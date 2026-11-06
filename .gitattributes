@@ -1,0 +1,28 @@
+# 默认按文本处理，仓库内统一 LF，检出时按平台转换
+* text=auto
+
+# 源码与文档强制 LF（避免跨平台 diff 噪音）
+*.py   text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.html text eol=lf
+*.txt  text eol=lf
+*.gitignore     text eol=lf
+*.gitattributes text eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd 解析异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 明确标记二进制，避免 diff/换行处理损坏文件
+*.exe  binary
+*.dll  binary
+*.pyz  binary
+*.ico  binary
+*.jpg  binary
+*.jpeg binary
+*.png  binary
+*.webp binary
+*.gif  binary
+*.bmp  binary

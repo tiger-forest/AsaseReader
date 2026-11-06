@@ -1,0 +1,69 @@
+{
+  "opus_id": "1261150454223470609",
+  "source_url": "https://www.bilibili.com/opus/1261150454223470609",
+  "title": "测试用专栏标题",
+  "author": {
+    "mid": 1499365030,
+    "name": "长夜月的长夜"
+  },
+  "published_at": 1792472872,
+  "published_text": "编辑于 2026年10月20日 13:11",
+  "downloaded_at": "2026-10-20T14:30:40+08:00",
+  "include_cover": true,
+  "cover": {
+    "file": "cover.jpg",
+    "url": "https://i0.hdslb.com/bfs/new_dyn/8acc4933844c41b479ea13634359b0271499365030.jpg",
+    "width": 1006,
+    "height": 565
+  },
+  "images": [
+    {
+      "index": 1,
+      "file": "images/001.jpg",
+      "url": "https://i0.hdslb.com/bfs/new_dyn/c8ba862fc105649fcf027b56206072dd1499365030.jpg",
+      "width": 522,
+      "height": 315,
+      "size": 38717
+    },
+    {
+      "index": 2,
+      "file": "images/002.jpg",
+      "url": "https://i0.hdslb.com/bfs/new_dyn/7f7d0f48a18b5d2b983d2467ea2f544c1499365030.jpg",
+      "width": 200,
+      "height": 200,
+      "size": 12299
+    },
+    {
+      "index": 3,
+      "file": "images/003.jpg",
+      "url": "https://i0.hdslb.com/bfs/new_dyn/35cbe4574379201d603ef91d3754dd811499365030.jpg",
+      "width": 1290,
+      "height": 696,
+      "size": 35476
+    },
+    {
+      "index": 4,
+      "file": "images/004.webp",
+      "url": "https://i0.hdslb.com/bfs/new_dyn/9ac8064688402c0bdf658566b6d9e3061499365030.webp",
+      "width": 690,
+      "height": 420,
+      "size": 23842
+    },
+    {
+      "index": 5,
+      "file": "images/005.jpg",
+      "url": "https://i0.hdslb.com/bfs/new_dyn/bfadd62c8cd4b778338977d72f6d9af01499365030.jpg",
+      "width": 200,
+      "height": 196,
+      "size": 14619
+    },
+    {
+      "index": 6,
+      "file": "images/006.jpg",
+      "url": "https://i0.hdslb.com/bfs/new_dyn/594af1ecd79cace9d2ad4abfafc8eaaa1499365030.jpg",
+      "width": 1279,
+      "height": 1428,
+      "size": 236896
+    }
+  ]
+}

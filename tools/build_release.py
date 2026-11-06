@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""浅濑阅读器一键出包（方案 plan-installer-package.md §3 / §5.4 / §10 CP4）。
+
+链路：自检 → 版本资源 → PyInstaller 两轨 → 安装包 → SHA256 → BUILD_INFO → 新鲜度硬校验。
+
+用法::
+
+    python tools/build_release.py --check     # 只体检 + 打印计划，不写文件、不打包
+    python tools/build_release.py --build     # 真出包（ISCC 缺位会明确失败，不假绿灯）
+    python tools/build_release.py --snapshot  # 生成/同步本地公开镜像仓库（CP5）
+
+``--snapshot`` 只产出**本地**镜像仓库，供用户用 GitHub Desktop 发布；
+**推 GitHub 与发 Release 不在本脚本**，本仓库永不设 remote。
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from gen_version_info import read_version  # noqa: E402  唯一来源，不重复解析
+
+SPEC = ROOT / "AsaseReader.spec"
+ISS = ROOT / "installer" / "AsaseReader.iss"
+GEN = ROOT / "tools" / "gen_version_info.py"
+SELFTEST = ROOT / "tests" / "selftest.py"
+SRC = ROOT / "src"
+GUI_HTML = ROOT / "src" / "asase_reader" / "assets" / "gui.html"
+PYINSTALLER = Path(sys.executable).with_name("pyinstaller.exe")
+DIST = ROOT / "dist"
+RELEASE = DIST / "release"
+
+# ---- 公开快照（CP5，方案 §5.2 长期镜像仓库）----
+SNAPSHOT_ROOT = ROOT / "build" / "public_snapshot"
+SNAPSHOT = SNAPSHOT_ROOT / "AsaseReader"
+ORIGIN_FILE = SNAPSHOT_ROOT / "origin.txt"
+SCAN = ROOT / "tools" / "scan_public_snapshot.py"
+SNAPSHOT_AUTHOR = "AsaseRin"
+SNAPSHOT_EMAIL = "79520005+tiger-forest@users.noreply.github.com"
+
+# 白名单：只认顶层这些名字，其余（.workbuddy/ / PROGRESS.md / 产物 / 数据）一律不带
+SNAPSHOT_ALLOW_TOP = frozenset({
+    ".gitattributes", ".gitignore", "AsaseReader.spec", "CHANGELOG.md",
+    "README.md", "LICENSE", "asase.py", "launch_gui.bat",
+    "pyproject.toml", "urls.example.txt",
+    "src", "tests", "tools", "installer",
+})
+SNAPSHOT_SKIP_NAMES = frozenset({
+    "node_modules", "__pycache__", ".pytest_cache", ".git",
+})
+SNAPSHOT_SKIP_SUFFIX = (".pyc", ".pyo", ".bak", ".log", ".exe", ".dll", ".pyd")
+SNAPSHOT_SKIP_FILES = frozenset({"version.iss"})
+
+ISCC_CANDIDATES = (
+    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+    / "Inno Setup 6" / "ISCC.exe",
+    Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    / "Inno Setup 6" / "ISCC.exe",
+)
+
+
+def newest_source_mtime() -> float:
+    """src/** 与 gui.html 的最新修改时间 —— 新鲜度纪律只认这个，不认提交信息。"""
+    files = [p for p in SRC.rglob("*")
+             if p.is_file() and "__pycache__" not in p.parts]
+    files.append(GUI_HTML)
+    return max(p.stat().st_mtime for p in files)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _registry_iscc() -> Path | None:
+    """从卸载注册表读 InstallLocation —— 支持装到非系统盘（本机是 F 盘）。
+
+    不把本机盘符硬编码进仓库；找不到就返回 None，由调用方明确报错。
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None
+    bases = (
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER,
+         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    )
+    for hive, base in bases:
+        try:
+            root = winreg.OpenKey(hive, base)
+        except OSError:
+            continue
+        try:
+            for i in range(winreg.QueryInfoKey(root)[0]):
+                try:
+                    sub = winreg.OpenKey(root, winreg.EnumKey(root, i))
+                except OSError:
+                    continue
+                try:
+                    name = str(winreg.QueryValueEx(sub, "DisplayName")[0])
+                    if "Inno Setup" not in name:
+                        continue
+                    loc = str(winreg.QueryValueEx(sub, "InstallLocation")[0])
+                    candidate = Path(loc) / "ISCC.exe"
+                    if candidate.is_file():
+                        return candidate
+                except OSError:
+                    continue
+                finally:
+                    winreg.CloseKey(sub)
+        finally:
+            winreg.CloseKey(root)
+    return None
+
+
+def find_iscc() -> Path | None:
+    override = os.environ.get("ASASE_ISCC")
+    if override:
+        path = Path(override)
+        if path.is_file():
+            return path
+    found = shutil.which("ISCC.exe")
+    if found:
+        return Path(found)
+    for candidate in ISCC_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    return _registry_iscc()
+
+
+def git_head() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            text=True, encoding="utf-8").strip()
+    except Exception:
+        return "unknown"
+
+
+def run(cmd: list[Path | str], *, env: dict[str, str] | None = None) -> None:
+    print("+", " ".join(str(x) for x in cmd), flush=True)
+    rc = subprocess.run([str(x) for x in cmd], cwd=str(ROOT), env=env).returncode
+    if rc != 0:
+        raise SystemExit(f"命令失败（rc={rc}）：{cmd[0]}")
+
+
+def check() -> int:
+    """只体检：不写任何文件、不跑打包。"""
+    for path in (SPEC, ISS, GEN, SELFTEST, PYINSTALLER):
+        if not path.exists():
+            raise SystemExit(f"缺文件：{path}")
+    version = read_version(ROOT / "src" / "asase_reader" / "__init__.py")
+    iscc = find_iscc()
+    print(f"version={version}")
+    print("plan: selftest -> gen_version_info -> pyinstaller onefile -> "
+          "pyinstaller onedir -> ISCC -> sha256 -> BUILD_INFO")
+    print(f"distpath: {DIST / 'onefile'} | {DIST / 'onedir'}")
+    print(f"snapshot: {SNAPSHOT}（长期镜像仓库，--snapshot 生成）")
+    print(f"iscc: {iscc if iscc else 'MISSING（CP8 编译安装包会卡住，需装 Inno Setup 6）'}")
+    print("CHECK OK")
+    return 0
+
+
+def build(skip_selftest: bool) -> int:
+    version = read_version(ROOT / "src" / "asase_reader" / "__init__.py")
+
+    # 1. 自检必须全绿才允许出包（失败由 subprocess 的非 0 退出码直接中断）
+    if not skip_selftest:
+        run([sys.executable, SELFTEST])
+
+    # 2. 版本号唯一来源 → 版本资源 + .iss 宏
+    run([sys.executable, GEN, "--out-dir", ROOT])
+
+    # 3. 两轨打包，distpath 隔离，避免 dist/AsaseReader.exe 与 dist/AsaseReader/ 混淆
+    # COLLECT 重跑时会先删整个 onedir 目录（130+ 文件），部分环境会拦批量删除
+    # 导致 --build 直接失败。改成把旧产物**挪走**，保证出包可重复执行。
+    onedir_target = DIST / "onedir" / "AsaseReader"
+    if onedir_target.exists():
+        backup = ROOT / "build" / f"onedir_prev_{int(time.time())}"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        onedir_target.rename(backup)
+        print(f"+ 旧 onedir 产物挪到 {backup}")
+    for mode in ("onefile", "onedir"):
+        env = dict(os.environ)
+        if mode == "onedir":
+            env["ASASE_PACKAGE_MODE"] = "onedir"
+        else:
+            env.pop("ASASE_PACKAGE_MODE", None)
+        env.setdefault("NODE_PATH", str(ROOT / ".cache" / "node_modules"))
+        run([PYINSTALLER, SPEC, "--noconfirm", "--clean",
+             "--distpath", DIST / mode,
+             "--workpath", ROOT / "build" / mode], env=env)
+
+    RELEASE.mkdir(parents=True, exist_ok=True)
+    green_src = DIST / "onefile" / "AsaseReader.exe"
+    if not green_src.is_file():
+        raise SystemExit(f"onefile 产物缺失：{green_src}")
+    portable = RELEASE / f"AsaseReader-{version}-portable.exe"
+    shutil.copy2(green_src, ROOT / "AsaseReader.exe")   # 根目录绿色版照旧
+    shutil.copy2(green_src, portable)
+
+    # 4. 安装包。ISCC 缺位必须明确失败，绝不能跳过还写「已打包」
+    iscc = find_iscc()
+    if iscc is None:
+        raise SystemExit("找不到 Inno Setup 6 的 ISCC.exe：安装包未生成。"
+                         "装好 ISCC 后重跑 --build（本脚本不会假装成功）。")
+    run([iscc, ISS])
+    compiled = DIST / "installer" / f"AsaseReaderSetup-{version}.exe"
+    if not compiled.is_file():
+        raise SystemExit(f"ISCC 没产出安装包：{compiled}")
+    setup = RELEASE / f"AsaseReaderSetup-{version}.exe"
+    shutil.copy2(compiled, setup)
+
+    # 5. 校验值 + 溯源信息
+    artifacts = (ROOT / "AsaseReader.exe", portable, setup)
+    (RELEASE / "SHA256SUMS.txt").write_text(
+        "".join(f"{sha256(p)}  {p.name}\n" for p in artifacts), encoding="utf-8")
+
+    src_mtime = newest_source_mtime()
+    lines = [
+        f"built_at={datetime.now().isoformat(timespec='seconds')}",
+        f"git_head={git_head()}",
+        f"version={version}",
+        f"source_newest_mtime={datetime.fromtimestamp(src_mtime).isoformat()}",
+    ]
+    for path in artifacts:
+        fresh = path.stat().st_mtime >= src_mtime
+        lines.append(
+            f"{path.name}: size={path.stat().st_size} "
+            f"mtime={datetime.fromtimestamp(path.stat().st_mtime).isoformat()} "
+            f"sha256={sha256(path)} fresh={fresh}")
+    (RELEASE / "BUILD_INFO.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # 6. 三件产物的 mtime 都必须晚于源码；有一条不满足就禁止发版
+    stale = [p.name for p in artifacts if p.stat().st_mtime < src_mtime]
+    if stale:
+        raise SystemExit(f"产物比源码旧，禁止发版：{stale}")
+    write_release_sums(version)
+    print(f"BUILD OK -> {RELEASE}")
+    return 0
+
+
+def write_release_sums(version: str) -> None:
+    """Release 专用两行校验值：本机 sums 有三行（含根目录同件），不直接上传。"""
+    portable = RELEASE / f"AsaseReader-{version}-portable.exe"
+    setup = RELEASE / f"AsaseReaderSetup-{version}.exe"
+    if not (portable.is_file() and setup.is_file()):
+        print(f"WARN: 缺 {version} 产物，未生成 Release 两行 sums")
+        return
+    out = RELEASE / "SHA256SUMS.release.txt"
+    out.write_text(
+        "".join(f"{sha256(p)}  {p.name}\n" for p in (portable, setup)),
+        encoding="utf-8")
+    print(f"+ 写出 {out}")
+
+
+def _skip_rel(rel: Path) -> bool:
+    if any(part in SNAPSHOT_SKIP_NAMES for part in rel.parts):
+        return True
+    if rel.name in SNAPSHOT_SKIP_FILES:
+        return True
+    return rel.name.endswith(SNAPSHOT_SKIP_SUFFIX)
+
+
+def _copy_whitelisted(dest: Path) -> int:
+    count = 0
+    for item in sorted(ROOT.iterdir()):
+        if item.name not in SNAPSHOT_ALLOW_TOP:
+            continue
+        if item.is_dir():
+            for p in sorted(item.rglob("*")):
+                rel = p.relative_to(ROOT)
+                if _skip_rel(rel):
+                    continue
+                target = dest / rel
+                if p.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif p.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(p, target)
+                    count += 1
+        elif item.is_file():
+            shutil.copy2(item, dest / item.name)
+            count += 1
+    return count
+
+
+def _git(args: list[str], cwd: Path, *, check: bool = True) -> str:
+    cp = subprocess.run(["git", *args], cwd=str(cwd), text=True,
+                        encoding="utf-8", capture_output=True)
+    if check and cp.returncode != 0:
+        raise SystemExit(f"git {' '.join(args)} 失败：{cp.stderr.strip()}")
+    return cp.stdout.strip()
+
+
+def snapshot() -> int:
+    """生成本地公开镜像仓库；保留同一个 .git，供 GitHub Desktop 持续 Push。"""
+    version = read_version(ROOT / "src" / "asase_reader" / "__init__.py")
+    info = RELEASE / "BUILD_INFO.txt"
+    if info.is_file():
+        built = next((ln.split("=", 1)[1] for ln in
+                      info.read_text(encoding="utf-8").splitlines()
+                      if ln.startswith("version=")), None)
+        if built and built != version:
+            raise SystemExit(
+                f"版本不一致：源码 {version} / BUILD_INFO {built}；请先 --build")
+
+    SNAPSHOT_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time())
+    had_git = (SNAPSHOT / ".git").is_dir()
+
+    # .git 丢失：能从记录的 origin 恢复就 clone，否则把孤儿目录挪走重建
+    if SNAPSHOT.exists() and not had_git:
+        origin = (ORIGIN_FILE.read_text(encoding="utf-8").strip()
+                  if ORIGIN_FILE.is_file() else "")
+        backup = ROOT / "build" / f"snapshot_orphan_{stamp}"
+        shutil.move(str(SNAPSHOT), str(backup))
+        print(f"+ 无 .git 的旧快照挪到 {backup}")
+        if origin:
+            run(["git", "clone", origin, str(SNAPSHOT)])
+            had_git = True
+            print(f"+ 已从 {origin} 恢复镜像仓库")
+
+    if not SNAPSHOT.exists():
+        SNAPSHOT.mkdir(parents=True)
+    if had_git:
+        # 镜像同步：整棵工作树（除 .git）挪走再复制 —— 天然实现「删除同步」
+        backup = ROOT / "build" / f"snapshot_prev_{stamp}"
+        backup.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for item in list(SNAPSHOT.iterdir()):
+            if item.name == ".git":
+                continue
+            shutil.move(str(item), str(backup / item.name))
+            moved += 1
+        print(f"+ 旧工作树 {moved} 项挪到 {backup}（保留 .git）")
+    else:
+        run(["git", "init", "-b", "main", str(SNAPSHOT)])
+        _git(["config", "user.name", SNAPSHOT_AUTHOR], SNAPSHOT)
+        _git(["config", "user.email", SNAPSHOT_EMAIL], SNAPSHOT)
+        print("+ 首次建立镜像仓库（main）")
+
+    count = _copy_whitelisted(SNAPSHOT)
+    run([sys.executable, str(SCAN), str(SNAPSHOT)])  # 命中即非 0，直接中断
+    write_release_sums(version)
+
+    _git(["add", "-A"], SNAPSHOT)
+    head = git_head()
+    if _git(["status", "--porcelain"], SNAPSHOT):
+        msg = (f"chore(snapshot): sync v{version} (from {head[:7]})" if had_git
+               else f"chore(snapshot): initial public snapshot v{version} (from {head[:7]})")
+        _git(["commit", "-m", msg], SNAPSHOT)
+        print(f"+ 提交：{msg}")
+    else:
+        print("SNAPSHOT OK（工作树无变化，无需新提交）")
+
+    origin = _git(["remote", "get-url", "origin"], SNAPSHOT, check=False)
+    if origin:
+        ORIGIN_FILE.write_text(origin + "\n", encoding="utf-8")
+    print(f"snapshot files={count} head={_git(['rev-parse', '--short', 'HEAD'], SNAPSHOT)}")
+    print(f"NEXT: GitHub Desktop → Add Local Repository → {SNAPSHOT}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--check", action="store_true")
+    group.add_argument("--build", action="store_true")
+    group.add_argument("--snapshot", action="store_true")
+    ap.add_argument("--skip-selftest", action="store_true")
+    args = ap.parse_args()
+    if args.check:
+        return check()
+    if args.snapshot:
+        return snapshot()
+    return build(args.skip_selftest)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
