@@ -147,8 +147,10 @@ if m:
           f"GUI 的 max={m.group(1)} 与 MAX_CONCURRENCY={MAX_CONCURRENCY} 一致")
 
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-m = re.search(r"并发\s*1~\s*(\d+)", readme)
-check(m is not None, "README 里能找到「并发 1~N」的红线表述")
+# 「并发 1~2」与「并发上限 2」两种写法都认：前者是历史表述，后者避开
+# Markdown 把成对 `~` 解析成删除线（2026-11-06 公开 README 精简后改用后者）。
+m = re.search(r"并发(?:上限\s*|1~\s*)(\d+)", readme)
+check(m is not None, "README 里能找到并发上限的红线表述")
 if m:
     check(int(m.group(1)) == MAX_CONCURRENCY,
           f"README 写的上限 {m.group(1)} 与 MAX_CONCURRENCY={MAX_CONCURRENCY} 一致")
