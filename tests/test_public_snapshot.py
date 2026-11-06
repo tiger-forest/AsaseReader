@@ -130,6 +130,56 @@ check("gaps = whitelist_gaps()" in BUILD
       and "if mirror and mirror != version:" in BUILD,
       "三项检查都接进了 --snapshot")
 
+# ---- 3.2 P1/P2 加固（2026-11-06 20:38 批准）----
+check("SNAPSHOT_ORIGIN_FALLBACK" in BUILD
+      and "https://github.com/tiger-forest/AsaseReader.git" in BUILD
+      and "origin = _saved_origin()" in BUILD,
+      "origin.txt 丢失时有入库常量兜底")
+with tempfile.TemporaryDirectory() as td:
+    saved_origin_file = br.ORIGIN_FILE
+    br.ORIGIN_FILE = Path(td) / "missing.txt"
+    check(br._saved_origin()
+          == "https://github.com/tiger-forest/AsaseReader.git",
+          "origin.txt 真的丢了也能返回兜底常量")
+    br.ORIGIN_FILE = saved_origin_file
+with tempfile.TemporaryDirectory() as td:
+    bdir = Path(td)
+    for i in range(4):
+        d = bdir / f"snapshot_prev_{1000 + i}"
+        d.mkdir()
+        (d / "a.txt").write_text("x", encoding="utf-8")
+    for i in range(3):
+        d = bdir / f"onedir_prev_{2000 + i}"
+        d.mkdir()
+        (d / "b.exe").write_text("x", encoding="utf-8")
+    removed = br.prune_backups(bdir, keep=2)
+    check(len(list(bdir.glob("snapshot_prev_*"))) == 2,
+          "snapshot 备份只留最近 2 份")
+    check(len(list(bdir.glob("onedir_prev_*"))) == 2,
+          "onedir 备份只留最近 2 份")
+    check(len(removed) == 3, "返回被清理列表，便于观测")
+check("prune_backups()" in BUILD and "BACKUP_KEEP" in BUILD,
+      "备份清理已接入 --build / --snapshot")
+
+with tempfile.TemporaryDirectory() as td:
+    empty = Path(td)
+    try:
+        br.write_release_sums("9.9.9", empty)
+        check(False, "缺产物时 write_release_sums 必须抛 SystemExit")
+    except SystemExit as exc:
+        check("拒绝生成 Release 两行 sums" in str(exc),
+              "错误信息明确指向 --build")
+    except Exception as exc:  # 崩溃也要变成明确 FAIL，不许测试自己炸掉
+        check(False, f"缺产物时应抛 SystemExit，实际 {type(exc).__name__}: {exc}")
+with tempfile.TemporaryDirectory() as td:
+    rel = Path(td)
+    (rel / "AsaseReader-9.9.9-portable.exe").write_bytes(b"a")
+    (rel / "AsaseReaderSetup-9.9.9.exe").write_bytes(b"b")
+    br.write_release_sums("9.9.9", rel)
+    lines = (rel / "SHA256SUMS.release.txt").read_text(
+        encoding="utf-8").splitlines()
+    check(len(lines) == 2, "有两件产物时生成两行 sums")
+
 # ---- 4. 扫描规则本身 ----
 check("HISTORY_DOCS" in SCAN_SRC, "CHANGELOG 历史文档放行机制存在")
 rules_block = SCAN_SRC.split("PATH_RULES =")[1].split("HISTORY_DOCS")[0]

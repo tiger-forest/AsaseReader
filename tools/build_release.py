@@ -43,6 +43,10 @@ RELEASE = DIST / "release"
 SNAPSHOT_ROOT = ROOT / "build" / "public_snapshot"
 SNAPSHOT = SNAPSHOT_ROOT / "AsaseReader"
 ORIGIN_FILE = SNAPSHOT_ROOT / "origin.txt"
+# `.git` 与 origin.txt 都在被忽略的 build/ 里，清 build 会一起没；
+# 常量兜底跟着代码入库，保证「镜像仓库丢了还能 clone 回来」。
+SNAPSHOT_ORIGIN_FALLBACK = "https://github.com/tiger-forest/AsaseReader.git"
+BACKUP_KEEP = 2  # snapshot_prev_* / onedir_prev_* 各保留最近几份
 SCAN = ROOT / "tools" / "scan_public_snapshot.py"
 SNAPSHOT_AUTHOR = "AsaseRin"
 SNAPSHOT_EMAIL = "79520005+tiger-forest@users.noreply.github.com"
@@ -252,6 +256,7 @@ def build(skip_selftest: bool) -> int:
         backup.parent.mkdir(parents=True, exist_ok=True)
         onedir_target.rename(backup)
         print(f"+ 旧 onedir 产物挪到 {backup}")
+        prune_backups()
     for mode in ("onefile", "onedir"):
         env = dict(os.environ)
         if mode == "onedir":
@@ -312,18 +317,60 @@ def build(skip_selftest: bool) -> int:
     return 0
 
 
-def write_release_sums(version: str) -> None:
-    """Release 专用两行校验值：本机 sums 有三行（含根目录同件），不直接上传。"""
-    portable = RELEASE / f"AsaseReader-{version}-portable.exe"
-    setup = RELEASE / f"AsaseReaderSetup-{version}.exe"
+def write_release_sums(version: str, release_dir: Path = RELEASE) -> None:
+    """Release 专用两行校验值：本机 sums 有三行（含根目录同件），不直接上传。
+
+    缺产物必须**硬失败**：以前只 WARN，会让下载者拿到旧 sums 配新包。
+    """
+    portable = release_dir / f"AsaseReader-{version}-portable.exe"
+    setup = release_dir / f"AsaseReaderSetup-{version}.exe"
     if not (portable.is_file() and setup.is_file()):
-        print(f"WARN: 缺 {version} 产物，未生成 Release 两行 sums")
-        return
-    out = RELEASE / "SHA256SUMS.release.txt"
+        raise SystemExit(
+            f"缺 {version} 的 portable / setup 产物，拒绝生成 Release 两行 sums；"
+            "请先 --build（上传旧 sums 会让下载者校验失败）。")
+    out = release_dir / "SHA256SUMS.release.txt"
     out.write_text(
         "".join(f"{sha256(p)}  {p.name}\n" for p in (portable, setup)),
         encoding="utf-8")
     print(f"+ 写出 {out}")
+
+
+def _saved_origin() -> str:
+    """origin.txt 丢了就用入库常量兜底，保证镜像仓库能从 GitHub clone 回来。"""
+    if ORIGIN_FILE.is_file():
+        text = ORIGIN_FILE.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    return SNAPSHOT_ORIGIN_FALLBACK
+
+
+def prune_backups(build_dir: Path = ROOT / "build",
+                  keep: int = BACKUP_KEEP) -> list[str]:
+    """P1：两类 *_prev_<ts> 备份只留最近 keep 份，避免无限堆积。
+
+    逐文件 unlink + 空目录 rmdir，不走 rmtree（大批量删除会被环境保护拦下）；
+    清理失败只警告，绝不阻断出包 / 同步主流程。返回被清理的目录名，便于测试观测。
+    """
+    removed: list[str] = []
+    if not build_dir.is_dir():
+        return removed
+    for prefix in ("snapshot_prev_", "onedir_prev_"):
+        dirs = sorted((p for p in build_dir.glob(prefix + "*") if p.is_dir()),
+                      key=lambda p: p.name)
+        for old in dirs[:-keep] if keep > 0 else dirs:
+            try:
+                for item in sorted(old.rglob("*"),
+                                   key=lambda p: len(p.parts), reverse=True):
+                    if item.is_file():
+                        item.unlink()
+                    elif item.is_dir():
+                        item.rmdir()
+                old.rmdir()
+                removed.append(old.name)
+                print(f"+ 清理旧备份 {old.name}")
+            except OSError as exc:
+                print(f"WARN: 清理备份 {old.name} 失败（不影响主流程）：{exc}")
+    return removed
 
 
 def _skip_rel(rel: Path) -> bool:
@@ -405,8 +452,7 @@ def snapshot() -> int:
 
     # .git 丢失：能从记录的 origin 恢复就 clone，否则把孤儿目录挪走重建
     if SNAPSHOT.exists() and not had_git:
-        origin = (ORIGIN_FILE.read_text(encoding="utf-8").strip()
-                  if ORIGIN_FILE.is_file() else "")
+        origin = _saved_origin()
         backup = ROOT / "build" / f"snapshot_orphan_{stamp}"
         shutil.move(str(SNAPSHOT), str(backup))
         print(f"+ 无 .git 的旧快照挪到 {backup}")
@@ -428,6 +474,7 @@ def snapshot() -> int:
             shutil.move(str(item), str(backup / item.name))
             moved += 1
         print(f"+ 旧工作树 {moved} 项挪到 {backup}（保留 .git）")
+        prune_backups()
     else:
         run(["git", "init", "-b", "main", str(SNAPSHOT)])
         _git(["config", "user.name", SNAPSHOT_AUTHOR], SNAPSHOT)

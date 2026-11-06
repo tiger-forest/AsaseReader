@@ -61,14 +61,17 @@ python -m asase_reader --version
 
 ## 从源码构建
 
+前置依赖：Python 3.11+（`pip install -e .`）、**jsdom**（`cd tests && npm install`，
+`--build` 会先跑自检，没装会直接失败）、**Inno Setup 6**（编安装包；脚本自动定位，
+也可用 `ASASE_ISCC` 指定，缺位会明确报错而不跳过）。
+
 ```bash
 python tools/build_release.py --check    # 只体检，不写文件
 python tools/build_release.py --build   # 自检 → 两轨打包 → 安装包 → SHA256
 ```
 
 `--build` 在 `dist/release/` 产出安装包、绿色单文件版、`SHA256SUMS.txt` 与
-`BUILD_INFO.txt`，并校验三件产物的时间都晚于源码。编安装包需要 **Inno Setup 6**
-（脚本会自动定位，也可用 `ASASE_ISCC` 指定）；只出绿色版可单跑
+`BUILD_INFO.txt`，并校验三件产物的时间都晚于源码；只出绿色版可单跑
 `pyinstaller AsaseReader.spec --noconfirm --clean`。
 
 发版时**只改 `src/asase_reader/__init__.py` 的 `__version__` 一行**，改完必须重跑
@@ -80,8 +83,8 @@ python tools/build_release.py --build   # 自检 → 两轨打包 → 安装包 
 ## 测试
 
 ```bash
-python tests/selftest.py        # 约 1 分钟，48 组
-cd tests && npm install         # 仅 jsdom，跑前端测试才需要
+cd tests && npm install         # jsdom，跑前端测试与 --build 都需要
+python tests/selftest.py        # 约 1 分钟；组数以 tests/selftest.py 的 PY_TESTS / JS_TESTS 为准
 ```
 
 ## 风控红线（改动下载相关代码时不要触碰）
