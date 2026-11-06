@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,9 @@ SNAPSHOT_ALLOW_TOP = frozenset({
     "pyproject.toml", "urls.example.txt",
     "src", "tests", "tools", "installer",
 })
+# 明确拍板「不公开」的入库顶层项。白名单 + 本集合必须覆盖 git ls-files 的
+# 全部顶层名，否则新增文件会被静默漏出公开快照（P0-1）。
+SNAPSHOT_KNOWN_EXCLUDED = frozenset({".workbuddy", "PROGRESS.md"})
 SNAPSHOT_SKIP_NAMES = frozenset({
     "node_modules", "__pycache__", ".pytest_cache", ".git",
 })
@@ -150,6 +154,59 @@ def git_head() -> str:
             text=True, encoding="utf-8").strip()
     except Exception:
         return "unknown"
+
+
+def whitelist_gaps(root: Path = ROOT) -> list[str]:
+    """P0-1：入库的顶层名必须要么在白名单、要么在明确排除集。
+
+    否则以后新增 docs/、新的根文件等会被 ``_copy_whitelisted`` 静默跳过，
+    而扫描器只看快照里已有的文件，照样 SCAN OK —— 线上悄悄缺文件。
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(root), "ls-files"],
+            text=True, encoding="utf-8")
+    except Exception:
+        return []
+    tops = {ln.split("/", 1)[0] for ln in out.splitlines() if ln.strip()}
+    return sorted(tops - SNAPSHOT_ALLOW_TOP - SNAPSHOT_KNOWN_EXCLUDED)
+
+
+def main_repo_dirty(root: Path = ROOT) -> bool:
+    """P0-2：快照复制的是工作树，提交信息却写 HEAD；有未提交改动就必须拦。
+
+    参数可注入，测试能在临时 git 仓库里真跑，而不是只检查源码里有这行字。
+    """
+    cp = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                        capture_output=True, text=True, encoding="utf-8")
+    return cp.returncode == 0 and bool(cp.stdout.strip())
+
+
+def mirror_version(snapshot_dir: Path = SNAPSHOT) -> str | None:
+    """P0-3：镜像最近一次快照提交里记录的版本号。"""
+    if not (snapshot_dir / ".git").is_dir():
+        return None
+    msg = _git(["log", "-1", "--format=%s"], snapshot_dir, check=False)
+    m = re.search(r"v(\d+\.\d+\.\d+)", msg)
+    return m.group(1) if m else None
+
+
+def source_drift(build_info: Path = RELEASE / "BUILD_INFO.txt") -> str | None:
+    """P0-3：源码在 --build 之后被改过 → 线上源码会与 Release 的 exe 脱节。
+
+    一致返回 None，不一致返回可直接展示的原因。
+    """
+    if not build_info.is_file():
+        return None
+    recorded = next((ln.split("=", 1)[1] for ln in
+                     build_info.read_text(encoding="utf-8").splitlines()
+                     if ln.startswith("source_newest_mtime=")), None)
+    if not recorded:
+        return None
+    actual = datetime.fromtimestamp(newest_source_mtime()).isoformat()
+    if recorded != actual:
+        return "源码在 --build 之后被改过：请先重跑 --build，否则线上源码与 Release 里的 exe 不是同一份代码。"
+    return None
 
 
 def run(cmd: list[Path | str], *, env: dict[str, str] | None = None) -> None:
@@ -310,15 +367,37 @@ def _git(args: list[str], cwd: Path, *, check: bool = True) -> str:
 
 def snapshot() -> int:
     """生成本地公开镜像仓库；保留同一个 .git，供 GitHub Desktop 持续 Push。"""
+    # P0-1：新增顶层文件必须显式拍板（进白名单或明确排除），不能静默漏
+    gaps = whitelist_gaps()
+    if gaps:
+        raise SystemExit(
+            "白名单漏了入库的顶层项（新增文件必须显式拍板公开或排除）："
+            + ", ".join(gaps))
+    # P0-2：先提交主仓库，快照的「来源 hash」才有意义
+    if main_repo_dirty():
+        raise SystemExit(
+            "主仓库有未提交改动：请先 commit 再 --snapshot。"
+            "快照复制的是工作树，带未提交内容会让来源 hash 指错提交。")
+
     version = read_version(ROOT / "src" / "asase_reader" / "__init__.py")
     info = RELEASE / "BUILD_INFO.txt"
     if info.is_file():
-        built = next((ln.split("=", 1)[1] for ln in
-                      info.read_text(encoding="utf-8").splitlines()
+        lines = info.read_text(encoding="utf-8").splitlines()
+        built = next((ln.split("=", 1)[1] for ln in lines
                       if ln.startswith("version=")), None)
         if built and built != version:
             raise SystemExit(
                 f"版本不一致：源码 {version} / BUILD_INFO {built}；请先 --build")
+    # P0-3a：改了 src/** 却没重跑 --build → 线上源码与 Release 的 exe 脱节
+    drift = source_drift()
+    if drift:
+        raise SystemExit(drift)
+    # P0-3b：三处版本同源（源码 / BUILD_INFO / 镜像最近提交）
+    mirror = mirror_version()
+    if mirror and mirror != version:
+        raise SystemExit(
+            f"版本不一致：镜像最近提交 {mirror} / 源码 {version}；"
+            "请先 --build 再 --snapshot")
 
     SNAPSHOT_ROOT.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time())

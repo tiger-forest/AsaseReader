@@ -7,6 +7,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,9 @@ SCAN_SRC = (ROOT / "tools" / "scan_public_snapshot.py").read_text(encoding="utf-
 SCAN = ROOT / "tools" / "scan_public_snapshot.py"
 LICENSE = (ROOT / "LICENSE").read_text(encoding="utf-8")
 PYPROJECT = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+sys.path.insert(0, str(ROOT / "tools"))
+import build_release as br  # noqa: E402  P0-1 白名单不变量要真调函数
 
 fails: list[str] = []
 
@@ -81,11 +85,50 @@ check("SNAPSHOT_AUTHOR = \"AsaseRin\"" in BUILD, "快照提交作者为 AsaseRin
 check("79520005+tiger-forest@users.noreply.github.com" in BUILD,
       "快照提交邮箱为已拍板的 noreply")
 check("BUILD_INFO" in BUILD and "请先 --build" in BUILD,
-      "三处版本一致性检查会阻断不一致")
+      "版本一致性检查会阻断不一致")
 check("str(SCAN), str(SNAPSHOT)" in BUILD, "生成快照后强制调用扫描器")
 check("SHA256SUMS.release.txt" in BUILD, "生成 Release 专用两行 sums")
 check("for p in (portable, setup)" in BUILD,
       "两行 sums 只含 portable 与 setup，不含根目录同件")
+
+# ---- 3.1 P0 三项加固（2026-11-06 20:18 批准；真跑，不靠字符串存在）----
+check(not br.whitelist_gaps(), "当前主仓库白名单覆盖全部入库顶层项")
+with tempfile.TemporaryDirectory() as td:
+    mini = Path(td)
+    subprocess.run(["git", "init", "-q"], cwd=mini, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=mini, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"],
+                   cwd=mini, check=True)
+    (mini / "README.md").write_text("x", encoding="utf-8")
+    (mini / "docs").mkdir()
+    (mini / "docs" / "a.md").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=mini, check=True)
+    check(br.whitelist_gaps(mini) == ["docs"],
+          "新增顶层目录会被白名单不变量抓到（不是静默漏）")
+    check(br.main_repo_dirty(mini), "有未提交改动 → 脏检查为真")
+    subprocess.run(["git", "commit", "-q", "-m",
+                    "chore(snapshot): sync v9.9.9 (from deadbeef)"],
+                   cwd=mini, check=True)
+    check(not br.main_repo_dirty(mini), "提交后工作区干净")
+    check(br.mirror_version(mini) == "9.9.9", "镜像最近提交版本被解析出来")
+
+    bi = mini / "BUILD_INFO.txt"
+    real = datetime.fromtimestamp(br.newest_source_mtime()).isoformat()
+    bi.write_text(f"version=2.1.0\nsource_newest_mtime={real}\n",
+                  encoding="utf-8")
+    check(br.source_drift(bi) is None, "BUILD_INFO 与源码 mtime 一致 → 不报警")
+    bi.write_text("version=2.1.0\nsource_newest_mtime=2000-01-01T00:00:00\n",
+                  encoding="utf-8")
+    check(br.source_drift(bi) is not None,
+          "源码被改过但没重跑 --build → 报警")
+    bi.unlink()
+    check(br.source_drift(bi) is None,
+          "没有 BUILD_INFO 时跳过（公开仓库 clone 场景）")
+check("gaps = whitelist_gaps()" in BUILD
+      and "if main_repo_dirty():" in BUILD
+      and "if drift:" in BUILD
+      and "if mirror and mirror != version:" in BUILD,
+      "三项检查都接进了 --snapshot")
 
 # ---- 4. 扫描规则本身 ----
 check("HISTORY_DOCS" in SCAN_SRC, "CHANGELOG 历史文档放行机制存在")
