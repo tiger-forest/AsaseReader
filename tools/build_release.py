@@ -381,27 +381,52 @@ def _skip_rel(rel: Path) -> bool:
     return rel.name.endswith(SNAPSHOT_SKIP_SUFFIX)
 
 
-def _copy_whitelisted(dest: Path) -> int:
-    count = 0
+def _wanted_files() -> dict[Path, Path]:
+    """白名单过滤后的「相对路径 → 源文件」映射，供差异同步使用。"""
+    wanted: dict[Path, Path] = {}
     for item in sorted(ROOT.iterdir()):
         if item.name not in SNAPSHOT_ALLOW_TOP:
             continue
         if item.is_dir():
             for p in sorted(item.rglob("*")):
                 rel = p.relative_to(ROOT)
-                if _skip_rel(rel):
+                if _skip_rel(rel) or not p.is_file():
                     continue
-                target = dest / rel
-                if p.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                elif p.is_file():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(p, target)
-                    count += 1
+                wanted[rel] = p
         elif item.is_file():
-            shutil.copy2(item, dest / item.name)
-            count += 1
-    return count
+            wanted[item.relative_to(ROOT)] = item
+    return wanted
+
+
+def _sync_worktree(dest: Path,
+                   wanted: dict[Path, Path] | None = None) -> tuple[int, int]:
+    """镜像同步：只删「主仓库已不存在」的文件，再覆盖复制。
+
+    以前整棵工作树挪走再复制，会不断产生 snapshot_prev_* 备份；而项目目录内
+    每个文件的删除约 0.25s（安全审计），清理一批旧备份要 5 分钟。
+    镜像仓库自己有 .git，旧内容都在历史里，根本不需要备份 —— 改为差异同步后
+    正常发版删除 0 个文件，零额外开销，且仍满足「删除同步」。
+    返回 (复制数, 删除数)。
+    """
+    wanted = wanted if wanted is not None else _wanted_files()
+    removed = 0
+    for top in sorted(dest.iterdir()):
+        if top.name == ".git":        # 跳过 git 内部成千上万的对象文件
+            continue
+        candidates = (sorted(top.rglob("*"), key=lambda q: len(q.parts),
+                             reverse=True) if top.is_dir() else [top])
+        for p in candidates:
+            if not p.is_file():
+                continue
+            if p.relative_to(dest) in wanted:
+                continue
+            p.unlink()
+            removed += 1
+    for rel, src in wanted.items():
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+    return len(wanted), removed
 
 
 def _git(args: list[str], cwd: Path, *, check: bool = True) -> str:
@@ -464,24 +489,16 @@ def snapshot() -> int:
     if not SNAPSHOT.exists():
         SNAPSHOT.mkdir(parents=True)
     if had_git:
-        # 镜像同步：整棵工作树（除 .git）挪走再复制 —— 天然实现「删除同步」
-        backup = ROOT / "build" / f"snapshot_prev_{stamp}"
-        backup.mkdir(parents=True, exist_ok=True)
-        moved = 0
-        for item in list(SNAPSHOT.iterdir()):
-            if item.name == ".git":
-                continue
-            shutil.move(str(item), str(backup / item.name))
-            moved += 1
-        print(f"+ 旧工作树 {moved} 项挪到 {backup}（保留 .git）")
-        prune_backups()
+        count, removed = _sync_worktree(SNAPSHOT)
+        print(f"+ 差异同步：{count} 文件，删除 {removed} 个多余文件（保留 .git）")
     else:
         run(["git", "init", "-b", "main", str(SNAPSHOT)])
         _git(["config", "user.name", SNAPSHOT_AUTHOR], SNAPSHOT)
         _git(["config", "user.email", SNAPSHOT_EMAIL], SNAPSHOT)
-        print("+ 首次建立镜像仓库（main）")
+        count, removed = _sync_worktree(SNAPSHOT)
+        print(f"+ 首次建立镜像仓库（main），{count} 文件")
+    prune_backups()  # 只管 --build 的 onedir 备份与历史遗留备份
 
-    count = _copy_whitelisted(SNAPSHOT)
     run([sys.executable, str(SCAN), str(SNAPSHOT)])  # 命中即非 0，直接中断
     write_release_sums(version)
 

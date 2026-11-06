@@ -75,8 +75,11 @@ for name in ("LICENSE", "src", "tests", "tools", "installer", "urls.example.txt"
 check("version.iss" in BUILD, "生成物 version.iss 被排除")
 check('add_argument("--snapshot"' in BUILD, "--snapshot 已注册")
 check('"git", "init", "-b", "main"' in BUILD, "首次建立 main 分支镜像仓库")
-check('if item.name == ".git":' in BUILD, "镜像同步保留 .git（删除同步）")
-check("snapshot_prev_" in BUILD, "旧工作树挪走而非删")
+check('if top.name == ".git":' in BUILD, "镜像同步跳过 .git（保留仓库）")
+check("_wanted_files" in BUILD and "_sync_worktree(SNAPSHOT)" in BUILD,
+      "差异同步：只删多余文件，不再整棵挪走工作树")
+check("snapshot_prev_" not in BUILD.split("def snapshot()")[1].split("def main()")[0],
+      "--snapshot 不再产生 snapshot_prev_* 工作树备份")
 check("_git([\"commit\"" in BUILD, "脚本自动 commit")
 check('["remote", "get-url", "origin"]' in BUILD,
       "记录 origin 以便 .git 丢失恢复")
@@ -179,6 +182,30 @@ with tempfile.TemporaryDirectory() as td:
     lines = (rel / "SHA256SUMS.release.txt").read_text(
         encoding="utf-8").splitlines()
     check(len(lines) == 2, "有两件产物时生成两行 sums")
+
+# 差异同步真跑：多余文件被删、.git 不被碰、新文件被复制
+with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as sd:
+    dest, srcroot = Path(td), Path(sd)
+    (dest / ".git").mkdir()
+    (dest / ".git" / "config").write_text("git-internal", encoding="utf-8")
+    (dest / "extra.txt").write_text("stale", encoding="utf-8")
+    (dest / "src").mkdir()
+    (dest / "src" / "old.py").write_text("stale", encoding="utf-8")
+    (srcroot / "src").mkdir()
+    (srcroot / "src" / "new.py").write_text("new", encoding="utf-8")
+    wanted = {Path("src/new.py"): srcroot / "src" / "new.py"}
+    copied, removed = br._sync_worktree(dest, wanted)
+    check((copied, removed) == (1, 2), f"复制 1 / 删除 2，实际 {copied}/{removed}")
+    git_cfg = dest / ".git" / "config"
+    check(git_cfg.is_file()
+          and git_cfg.read_text(encoding="utf-8") == "git-internal",
+          ".git 内部文件不被碰")
+    new_file = dest / "src" / "new.py"
+    check(new_file.is_file()
+          and new_file.read_text(encoding="utf-8") == "new",
+          "新文件被复制")
+    check(not (dest / "extra.txt").exists()
+          and not (dest / "src" / "old.py").exists(), "多余文件真的被删")
 
 # ---- 4. 扫描规则本身 ----
 check("HISTORY_DOCS" in SCAN_SRC, "CHANGELOG 历史文档放行机制存在")

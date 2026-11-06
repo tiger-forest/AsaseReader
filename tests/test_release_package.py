@@ -146,11 +146,13 @@ if iss_path.is_file():
 print("\n--- build_release.py：一键出包链路 ---")
 build_src = (ROOT / "tools" / "build_release.py").read_text(encoding="utf-8")
 check("def newest_source_mtime" in build_src, "新鲜度基准来自 src/** 与 gui.html")
-check("SHA256SUMS" in build_src and "hashlib.sha256" in build_src,
-      "生成 SHA256 校验值")
+check('(RELEASE / "SHA256SUMS.txt").write_text(' in build_src
+      and "hashlib.sha256" in build_src,
+      "生成三行 SHA256SUMS 校验值（锚定写入调用本身）")
 check("BUILD_INFO" in build_src, "生成 BUILD_INFO 溯源信息")
-check("source_newest_mtime" in build_src and "fresh=" in build_src,
-      "BUILD_INFO 记源码最新 mtime 并逐件标 fresh")
+check('f"source_newest_mtime={datetime.fromtimestamp(src_mtime).isoformat()}",'
+      in build_src and "fresh=" in build_src,
+      "BUILD_INFO 记源码最新 mtime 并逐件标 fresh（锚定写入行）")
 check("产物比源码旧，禁止发版" in build_src, "新鲜度不达标时退出非 0")
 check("ASASE_PACKAGE_MODE" in build_src, "onedir 分支显式设环境变量")
 check("DIST / 'onefile'" in build_src and "DIST / 'onedir'" in build_src,
