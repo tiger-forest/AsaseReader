@@ -1375,7 +1375,12 @@
   }
   /* 章末页挂在视频容器里时，「点空白处回到上一页」那条提示不适用（没有上一页） */
   #readerEnd.forVideo .endHint { display: none; }
-  #singleImg.tall { width: 100%; max-width: 900px; height: auto; max-height: none; object-fit: none; }
+  /* 长图只改宽高约束，object-fit 一律继承 #singleImg 的 contain。
+     这里曾写过 object-fit: none：内容按**原始像素**画进被 max-width:900px 缩小的
+     元素框，超出的部分居中裁掉 —— 原图宽度大于 900px 的长图左右两侧整条消失
+     （2026-11-10 真实 Chromium 截图实测）。jsdom 不排版、量不出裁切，
+     由 test_reader_fit.js 静态守住「不许再写回来」。 */
+  #singleImg.tall { width: 100%; max-width: 900px; height: auto; max-height: none; }
 
   body.zooming #readerBody { overflow: hidden; }
   #singleImg.zoomed { cursor: grab; }

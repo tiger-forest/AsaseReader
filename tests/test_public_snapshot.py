@@ -130,8 +130,10 @@ with tempfile.TemporaryDirectory() as td:
 check("gaps = whitelist_gaps()" in BUILD
       and "if main_repo_dirty():" in BUILD
       and "if drift:" in BUILD
-      and "if mirror and mirror != version:" in BUILD,
-      "三项检查都接进了 --snapshot")
+      and "gap = mirror_gap(" in BUILD
+      and "if gap:" in BUILD
+      and "raise SystemExit(gap)" in BUILD,
+      "三项检查都接进了 --snapshot（P0-3b 走 mirror_gap，升版本不再自锁）")
 
 # ---- 3.2 P1/P2 加固（2026-11-06 20:38 批准）----
 check("SNAPSHOT_ORIGIN_FALLBACK" in BUILD

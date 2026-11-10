@@ -195,6 +195,31 @@ def mirror_version(snapshot_dir: Path = SNAPSHOT) -> str | None:
     return m.group(1) if m else None
 
 
+def mirror_gap(mirror: str | None, version: str) -> str | None:
+    """P0-3b：镜像最近提交里的版本相对源码版本是否合法。
+
+    - 无镜像记录 / 版本相同 → 放行。
+    - 镜像**落后**于源码 → 放行：升版本后第一次 --snapshot 本来就该把镜像
+      推进到新版本。旧实现在这里硬拦「mirror != version」，可 --build 并不会
+      改镜像的提交信息，于是流程自锁、新版本永远同步不出去（v2.1.1 首次踩到，
+      报错还误导成「请先 --build」）。
+    - 源码版本**回退**到比镜像更旧 → 拦住，返回可直接展示的原因。
+    """
+    if not mirror or mirror == version:
+        return None
+
+    def vt(s: str) -> tuple[int, ...]:
+        try:
+            return tuple(int(x) for x in s.split("."))
+        except ValueError:
+            return ()
+
+    if vt(version) < vt(mirror):
+        return (f"源码版本 {version} 低于镜像最近提交 {mirror}（版本回退？）；"
+                "请确认版本号后再 --snapshot")
+    return None
+
+
 def source_drift(build_info: Path = RELEASE / "BUILD_INFO.txt") -> str | None:
     """P0-3：源码在 --build 之后被改过 → 线上源码会与 Release 的 exe 脱节。
 
@@ -464,12 +489,11 @@ def snapshot() -> int:
     drift = source_drift()
     if drift:
         raise SystemExit(drift)
-    # P0-3b：三处版本同源（源码 / BUILD_INFO / 镜像最近提交）
-    mirror = mirror_version()
-    if mirror and mirror != version:
-        raise SystemExit(
-            f"版本不一致：镜像最近提交 {mirror} / 源码 {version}；"
-            "请先 --build 再 --snapshot")
+    # P0-3b：源码 / BUILD_INFO 同源（上面两道守卫）+ 镜像版本不得领先于源码。
+    # 升版本后镜像必然落后，本次同步就是去推进它，不能再按「必须相等」硬拦。
+    gap = mirror_gap(mirror_version(), version)
+    if gap:
+        raise SystemExit(gap)
 
     SNAPSHOT_ROOT.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time())

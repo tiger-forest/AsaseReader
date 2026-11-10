@@ -182,6 +182,18 @@ check("return _registry_iscc()" in build_src, "注册表兜底真的被调用")
 check("onedir_prev_" in build_src and ".rename(" in build_src,
       "重跑 --build 时把旧 onedir 产物挪走而非删除（真机踩到批量删除拦截）")
 
+print("\n--- P0-3b：升版本后 --snapshot 不能自锁 ---")
+sys.path.insert(0, str(ROOT / "tools"))
+import build_release as br  # noqa: E402
+check(br.mirror_gap(None, "2.1.1") is None, "还没有镜像记录：放行")
+check(br.mirror_gap("2.1.1", "2.1.1") is None, "镜像与源码同版：放行")
+check(br.mirror_gap("2.1.0", "2.1.1") is None,
+      "镜像落后一版：放行（本次同步正是去推进它，旧实现在这里自锁）")
+check(br.mirror_gap("2.1.1", "2.1.0") is not None,
+      "源码版本回退到比镜像更旧：仍然拦住")
+check("mirror_gap(" in build_src and "raise SystemExit(gap)" in build_src,
+      "snapshot() 真的接上了新判定，不是只留个没用的函数")
+
 print()
 if fails:
     print(f"FAILED {len(fails)}")

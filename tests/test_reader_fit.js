@@ -9,10 +9,14 @@
  *   2) 行为层面：横版图 / 竖版图 → 不带 tall、容器加 fit（锁高度，图片缩到装得下）；
  *      长图（h/w > 1.8）→ 带 tall、容器不加 fit（保留滚动，否则它反而滚不了）。
  *   3) 长图首次 toast：每章只提示一次，同章第二张长图不再打扰；换章后可再提示。
+ *   4) 长图左右两侧不许被裁：.tall 不得覆盖 object-fit（尤其不能写 none），
+ *      基类 #singleImg 必须保留 object-fit:contain。
  *
- * 说明：jsdom 不做真实排版，无法验证"实际有没有滚动条"——那是人工手感验收项。
- * 这里能守的是**约束条件是否成立**（类名、CSS 声明），回归价值在于防止有人把
- * max-height 改回去。
+ * 说明：jsdom 不做真实排版，无法验证"实际有没有滚动条"，也量不出图片是否被裁
+ * ——那是人工手感验收项（DEV_GUIDE.md 回归清单）。这里能守的是**约束条件是否
+ * 成立**（类名、CSS 声明），回归价值在于防止有人把 max-height 或 object-fit
+ * 改回去。第 4 点的实测依据是真实 Chromium 截图：object-fit:none 会按原始像素
+ * 画进被 max-width:900px 缩小的框，左右对称裁掉。
  */
 const fs = require('fs');
 const path = require('path');
@@ -84,6 +88,17 @@ ok(hasDecl(fitDecls, 'height', '100%'), '#singleWrap.fit 是 height:100%（min-h
 const tallDecls = ruleDecls('#singleImg.tall {');
 ok(tallDecls !== null, '样式里有 #singleImg.tall 规则');
 ok(hasDecl(tallDecls, 'max-height', 'none'), '#singleImg.tall 覆盖为 max-height:none（长图仍可滚动看完）');
+
+console.log('');
+console.log('--- CSS 约束：长图左右两侧不许被裁 ---');
+/* 真实 Chromium 实测（1200×3600 测试图、框宽 900）：object-fit:none 时左右色条
+   整条消失，换成 contain 后左右都还在。原因是 none 按原始像素画进缩小的框，
+   超出部分居中裁掉。jsdom 不排版，只能守这两个必要条件。 */
+ok(hasDecl(imgDecls, 'object-fit', 'contain'),
+   '#singleImg 基类有 object-fit:contain（长图不覆盖时由它兜底）');
+const tallFit = tallDecls && tallDecls.match(/(^|[;\s{])object-fit\s*:\s*([^;}]+)/i);
+ok(!tallFit || tallFit[2].trim().toLowerCase() === 'contain',
+   '#singleImg.tall 不覆盖 object-fit（写 none 会裁掉长图左右两侧）');
 
 async function bootDom() {
   const errs = [];
