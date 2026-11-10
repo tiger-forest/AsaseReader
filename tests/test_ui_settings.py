@@ -165,7 +165,7 @@ print("\n--- 前端：界面偏好一律走 setUiPref（localStorage + 后端各
 ok("function setUiPref(" in html_src, "定义了 setUiPref")
 for key in ["uiThumbMode", "uiTheme", "uiMode", "uiCardHover", "uiCardShadow",
             "uiMaxTaskbar", "uiWinAnim", "uiCoverMode", "uiCardSize",
-            "readerMode", "uiThumbLast"]:
+            "readerMode", "uiThumbLast", "closeToTray"]:
     ok(f'setUiPref("{key}"' in html_src,
        f"{key} 走 setUiPref —— 直接写 localStorage 的话后端副本就没有它")
     ok(f'localStorage.setItem("{key}"' not in html_src,

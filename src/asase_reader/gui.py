@@ -11,7 +11,7 @@ from pathlib import Path
 
 import webview
 
-from . import __version__
+from . import __version__, tray
 from .backend import Backend
 from .staticserver import StaticServer
 
@@ -302,6 +302,11 @@ def _restore_from_maximized(hwnd) -> bool:
 # 被回收的内存，下一条窗口消息就崩了。
 _nccalcsize_hook = None
 
+# 单实例唤醒（v2.2.0）：由 launch_gui 在拿到 RegisterWindowMessage 的 id 后填好。
+# WndProc 收到这条广播就把藏起来的窗口 show() 回来；两个进程用同一个消息名。
+_wake_msg_id = 0
+_wake_callback = None
+
 
 def _install_native_borderless(window) -> bool:
     """给窗口装 WM_NCCALCSIZE 钩子：整个窗口都算客户区，原生标题栏/边框不再出现。
@@ -324,6 +329,19 @@ def _install_native_borderless(window) -> bool:
 
     def _proc(h, msg, wparam, lparam):
         try:
+            # 关机 / 注销也会来 FormClosing。pywebview 的 closing 事件不传
+            # CloseReason，只能在这里提前置位，让拦截放行，别拖住系统关机。
+            if msg in (tray.WM_QUERYENDSESSION, tray.WM_ENDSESSION):
+                tray.mark_session_ending()
+            # 第二个实例广播的唤醒消息：把藏起来的窗口叫回来，不再启动后端。
+            if _wake_msg_id and msg == _wake_msg_id:
+                cb = _wake_callback
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception:
+                        pass
+                return 0
             if msg == _WM_NCCALCSIZE and wparam:
                 return 0      # 整个窗口都是客户区 → 不绘制任何非客户区
             return u32.CallWindowProcW(_proc.old, h, msg, wparam, lparam)
@@ -534,6 +552,13 @@ class GuiApi:
         self._fs_rect = None
         self._fs_state = 0
         self._fs_placement = None
+        # 关闭行为（v2.2.0）：后端内存镜像。closing 拦截读它而不是读文件 ——
+        # 前端 setUiPref 的 save_ui_settings 是异步调用且没有 await，刚勾上就
+        # 点 × 时直接读 ui_settings.json 可能还是旧值。
+        self._close_to_tray = tray.parse_close_to_tray(self._b.get_ui_settings())
+        # 「退出」放行标志：destroy() 内部就是 Form.Close()，同样会触发 closing，
+        # 不置位的话托盘菜单的退出会被自己拦死。
+        self._exiting = False
 
     @property
     def _window(self):
@@ -588,7 +613,12 @@ class GuiApi:
         return self._b.get_ui_settings()
 
     def save_ui_settings(self, settings: dict) -> dict:
-        return self._b.save_ui_settings(settings or {})
+        settings = settings or {}
+        result = self._b.save_ui_settings(settings)
+        if tray.CLOSE_TO_TRAY_KEY in settings:
+            self._close_to_tray = tray.parse_close_to_tray(
+                {tray.CLOSE_TO_TRAY_KEY: settings[tray.CLOSE_TO_TRAY_KEY]})
+        return result
 
     # ---- 登录凭据（充电专属内容） ----
     # Cookie 只在后端内存里，这些方法都不返回凭据原文。
@@ -1046,7 +1076,16 @@ def launch_gui(state_dir: str | None = None) -> None:
     """启动 GUI。state_dir 缺省 = DATA_DIR（方案 §3 双锚点：frozen 时
     %LOCALAPPDATA%\\AsaseReader、源码时仓库根 .asase）；显式传入的相对路径
     仍锚定项目根目录，exe 启动时不受 cwd 影响。"""
+    global _wake_msg_id, _wake_callback
     from .backend import PROJECT_ROOT, get_data_dir  # exe 场景下为 exe 所在目录
+
+    # 单实例（v2.2.0）：必须在创建 Backend / 启动静态服务之前判定，否则第二个
+    # 实例会去抢固定端口 28765 和固定 webview_data。不是主实例时只广播一条
+    # 唤醒消息，让已经藏在托盘里的窗口 show() 回来，然后直接返回。
+    primary, wake_id = tray.acquire_single_instance()
+    if not primary:
+        tray.wake_existing_window(wake_id)
+        return
 
     if state_dir is None:
         sd = get_data_dir()
@@ -1067,10 +1106,11 @@ def launch_gui(state_dir: str | None = None) -> None:
     # ui_settings.json 兜底，见 GuiApi.save_ui_settings）。
     base = server.start(port=_GUI_PORT)
     backend.static_server = server
+    api = GuiApi(backend)
     window = webview.create_window(
         title=f"浅濑阅读器 Asase Reader v{__version__}",
         url=f"{base}/",
-        js_api=GuiApi(backend),
+        js_api=api,
         width=1080,
         height=800,
         min_size=(820, 600),
@@ -1083,6 +1123,53 @@ def launch_gui(state_dir: str | None = None) -> None:
     )
     backend.window = window
 
+    # ---- 托盘（v2.2.0）：菜单只有「显示主界面」「退出」两项 ----
+    def _show_from_tray():
+        """把藏起来的窗口叫回来。
+
+        Hide()/Show() 只切 WS_VISIBLE，不改 WindowState 也不动 topmost，
+        所以全屏 / 最大化的记账天然保持一致，不需要额外复原状态。
+        """
+        try:
+            window.show()
+            _install_native_borderless(window)   # 幂等：句柄万一重建过就补挂
+            tray_icon.set_visible(False)
+        except Exception:
+            pass
+
+    def _exit_from_tray():
+        # destroy() 内部就是 Form.Close()，同样会触发 closing；不先放行会被自己拦死。
+        api._exiting = True
+        try:
+            tray_icon.dispose()
+        except Exception:
+            pass
+        try:
+            window.destroy()     # 真销毁 → Application.Exit → finally 收尾
+        except Exception:
+            pass
+
+    tray_icon = tray.TrayIcon(icon_file, _show_from_tray, _exit_from_tray)
+    _wake_msg_id = wake_id
+    _wake_callback = _show_from_tray
+
+    def _on_closing():
+        """关闭拦截的唯一入口：前端 × 按钮与 Alt+F4 / 任务栏「关闭」都走这里。
+
+        返回 False = 取消关闭（pywebview 置 args.Cancel）。隐藏失败一律放行，
+        宁可真退出，也绝不能把窗口锁死。
+        """
+        if tray.decide_close(api._close_to_tray, api._exiting) != "hide":
+            return None
+        try:
+            window.hide()
+            tray_icon.set_visible(True)
+        except Exception:
+            return None
+        return False
+
+    window.events.closing += _on_closing
+
     def _init_native_window():
         """首次显示前装好边框钩子，并把最大化边界限定到工作区。
 
@@ -1092,6 +1179,9 @@ def launch_gui(state_dir: str | None = None) -> None:
         拿不到 native 就跳过，代价只是最大化时盖住任务栏，功能不受影响。
         """
         _install_native_borderless(window)
+        # before_show 是 Event(self, True)：同步跑在 UI 线程，正是创建 WinForms
+        # 控件的唯一安全时机。别挪到 events.shown（Event(self)，异步线程）。
+        tray_icon.create()
         try:
             import clr
             clr.AddReference("System.Windows.Forms")
@@ -1123,6 +1213,10 @@ def launch_gui(state_dir: str | None = None) -> None:
         except TypeError:      # 老版本 pywebview 没有这几个参数
             webview.start()
     finally:
+        try:
+            tray_icon.dispose()
+        except Exception:
+            pass
         backend.stop()
         server.stop()
 

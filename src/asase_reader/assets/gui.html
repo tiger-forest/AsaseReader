@@ -3359,6 +3359,8 @@
       <input type="checkbox" id="cfg_ui_max_taskbar" checked></label>
     <label class="uirow"><span>最大化 / 还原动画<em>系统原生过渡：窗口平滑放大缩小，关闭则一步到位</em></span>
       <input type="checkbox" id="cfg_ui_win_anim" checked></label>
+    <label class="uirow"><span>关闭时进入托盘<em>默认不开启（直接关闭）；开启后点关闭只隐藏窗口，程序仍在后台运行，需从托盘菜单「退出」</em></span>
+      <input type="checkbox" id="cfg_ui_close_to_tray"></label>
     <div class="dirrow">
       <span class="lbl">封面形状</span>
       <select id="cfg_ui_cover">
@@ -6319,7 +6321,7 @@ function applyUiSettings() {
   // 回填控件：切走再切回来、或下次启动时，显示的要和实际生效的值一致
   const th = $("cfg_ui_theme"), mo = $("cfg_ui_mode"), h = $("cfg_ui_cardhover"), s = $("cfg_ui_cardshadow"),
         c = $("cfg_ui_cover"), z = $("cfg_ui_cardsize"), mt = $("cfg_ui_max_taskbar"),
-        wa = $("cfg_ui_win_anim");
+        wa = $("cfg_ui_win_anim"), ct = $("cfg_ui_close_to_tray");
   document.body.style.setProperty("--cardMin", uiCardSize() + "px");
   if (th) th.value = theme;
   if (mo) {
@@ -6346,6 +6348,7 @@ function applyUiSettings() {
   const maxTaskbar = localStorage.getItem("uiMaxTaskbar") !== "0";
   if (mt) mt.checked = maxTaskbar;
   if (wa) wa.checked = uiWinAnim();
+  if (ct) ct.checked = localStorage.getItem("closeToTray") === "1";
 }
 function initUiSettings() {
   const sel = $("cfg_thumb_mode");
@@ -6376,6 +6379,9 @@ function initUiSettings() {
   });
   bind("cfg_ui_win_anim", "change", (e) => {
     setUiPref("uiWinAnim", e.target.checked ? "1" : "0");
+  });
+  bind("cfg_ui_close_to_tray", "change", (e) => {
+    setUiPref("closeToTray", e.target.checked ? "1" : "0");
   });
   const initMaxTaskbar = localStorage.getItem("uiMaxTaskbar") !== "0";
   try { api().set_taskbar_mode(initMaxTaskbar); } catch (_) {}
