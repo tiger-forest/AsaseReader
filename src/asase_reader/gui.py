@@ -180,6 +180,164 @@ def _set_window_placement(hwnd: int, wp) -> bool:
         return False
 
 
+# WinForms 内部记「还原后该回到哪」的私有字段（本机 Form 实测：
+# restoreBounds / restoredWindowBounds，类型 System.Drawing.Rectangle）。
+# 只改 Win32 的 rcNormalPosition 不够：Maximized→Normal 时 WinForms 会按自己
+# 这份缓存再把窗口摆回小矩形，那一帧就是「窗口突然还原、图片瞬移到左上」。
+_WF_BOUND_FIELDS = ("restoreBounds", "restoredWindowBounds")
+
+
+def _wf_fields(native):
+    """探出 WinForms Form 里两个还原矩形字段；环境不支持就返回空列表。
+
+    按名字 + 类型双层过滤，并沿 BaseType 往上找（native 可能是 Form 子类）。
+    换 .NET 版本导致字段改名时探测不到 → 调用方整体降级回原路径，不硬写。
+    """
+    if native is None:
+        return []
+    try:
+        import clr  # noqa: F401
+        clr.AddReference("System.Drawing")
+        from System.Reflection import BindingFlags
+        flags = (BindingFlags.Instance | BindingFlags.NonPublic
+                 | BindingFlags.Public)
+        out, cur = [], native.GetType()
+        while cur is not None:
+            for f in cur.GetFields(flags):
+                if (f.Name in _WF_BOUND_FIELDS
+                        and f.FieldType.FullName == "System.Drawing.Rectangle"):
+                    out.append((f.Name, f))
+            cur = cur.BaseType
+        return out
+    except Exception:
+        return []
+
+
+def _wf_capture(native):
+    """[(field, 原值)]，供退出时对称写回；同名字段只留第一个。"""
+    out, seen = [], set()
+    for name, f in _wf_fields(native):
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            out.append((f, f.GetValue(native)))
+        except Exception:
+            pass
+    return out
+
+
+def _wf_write(native, items):
+    """写回 [(field, value)]；返回成功个数（全成功才算数）。"""
+    n = 0
+    for f, v in items:
+        try:
+            f.SetValue(native, v)
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _wf_rect(rect_phys):
+    """构造 System.Drawing.Rectangle；拿不到 .NET 类型返回 None。"""
+    try:
+        import clr  # noqa: F401
+        clr.AddReference("System.Drawing")
+        import System.Drawing as Drawing
+        x, y, w, h = (int(v) for v in rect_phys)
+        return Drawing.Rectangle(x, y, w, h)
+    except Exception:
+        return None
+
+
+def _preset_restore_rect(hwnd: int, rect_phys) -> bool:
+    """把 Win32 的 WINDOWPLACEMENT.rcNormalPosition 预置成 rect_phys。
+
+    showCmd 保持读回的当前状态（最大化态是 SW_SHOWMAXIMIZED）：这次只想改
+    「还原位置」，不想动窗口。失败返回 False。
+    """
+    if not hwnd or not rect_phys:
+        return False
+    try:
+        wp = _get_window_placement(hwnd)
+        if wp is None:
+            return False
+        x, y, w, h = (int(v) for v in rect_phys)
+        wp.rcNormalPosition = _RECT(x, y, x + w, y + h)
+        return bool(ctypes.windll.user32.SetWindowPlacement(
+            ctypes.c_void_p(int(hwnd)), ctypes.byref(wp)))
+    except Exception:
+        return False
+
+
+def _preset_fullscreen_bounds(hwnd, native, rect_phys, wp_orig):
+    """两处缓存同时预置成全屏；返回 (ok, saved_items)。
+
+    真机实测（.cache/probe_fs_winforms_state.py patch2）：只改一处仍会出现
+    1350x975 的小窗口帧；两处都改才是 2582x1550 → 2560x1600 → 2582x1626
+    → 2560x1600，全程铺满。任一环节失败都把两处回滚到原值并返回 False，
+    调用方走原始路径（仍闪，但绝不比基线更糟）。
+    """
+    saved = _wf_capture(native)
+    full = _wf_rect(rect_phys)
+    if not saved or full is None:
+        return False, []
+    if not _preset_restore_rect(hwnd, rect_phys):
+        return False, []
+    written = _wf_write(native, [(f, full) for f, _v in saved])
+    if written != len(saved):
+        _set_window_placement(hwnd, wp_orig)
+        _wf_write(native, saved)
+        return False, []
+    return True, saved
+
+
+def _wait_maximized(hwnd: int, timeout: float = 0.2) -> bool:
+    """等 `WS_MAXIMIZE` 真的置上（SW_MAXIMIZE 后 WinForms 才处理完状态切换）。
+
+    退出全屏要等这一步再把两处还原缓存写回：写早了 WinForms 会在随后处理
+    WM_SIZE 时用自己的 `restoreBounds` 覆盖写回值，用户点「还原」就回不去原大小。
+    超时返回 False，调用方**照常写回**（缓存不能长期留着被预置的整屏矩形）。
+    """
+    if not hwnd:
+        return False
+    try:
+        u32 = ctypes.windll.user32
+        deadline = time.monotonic() + timeout
+        while True:
+            style = int(u32.GetWindowLongPtrW(ctypes.c_void_p(int(hwnd)), -16))
+            if style & 0x01000000:                  # WS_MAXIMIZE
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.002)
+    except Exception:
+        return False
+
+
+def _restore_fullscreen_bounds(hwnd, native, saved, wp_orig) -> bool:
+    """把两处「还原位置」写回进全屏前的值；只改缓存，不动当前窗口几何。
+
+    **必须在窗口已经回到最大化之后调用**。先写回再 SW_MAXIMIZE 的话，状态切换
+    期间 Win32 / WinForms 会按缓存里的小矩形各摆一次窗口 —— 退出全屏也会
+    「窗口突然还原、图片瞬移到左上」，与进全屏那次同源。真机探针
+    `.cache/probe_fs_exit_sequence.py`：旧顺序 `2560x1600 → 1350x975(约 38ms)
+    → 2582x1550`；改成「先切状态、后写回」后只有 `2560x1600 → 2582x1550`
+    两帧，零小窗帧，用户点「还原」仍回 1350x975。
+
+    Win32 走 `_preset_restore_rect()`：读当前 placement、只改 rcNormalPosition，
+    showCmd 保持当前状态，不借 SetWindowPlacement 顺带再切一次窗口状态。
+    """
+    ok_wf = _wf_write(native, saved) == len(saved) if saved else True
+    ok_wp = True
+    if wp_orig is not None:
+        r = wp_orig.rcNormalPosition
+        ok_wp = _preset_restore_rect(
+            hwnd, (int(r.l), int(r.t), int(r.r - r.l), int(r.b - r.t)))
+    return ok_wf and ok_wp
+
+
 def _window_rect_phys(hwnd: int):
     """GetWindowRect：窗口外接矩形 `(x, y, w, h)`，物理像素；失败返回 None。"""
     if not hwnd:
@@ -552,6 +710,9 @@ class GuiApi:
         self._fs_rect = None
         self._fs_state = 0
         self._fs_placement = None
+        # WinForms 内部还原矩形字段的原值（[(field, value)]），退出时对称写回。
+        # 空列表 = 本次没预置（非最大化态 / 探测失败），退出时是 no-op。
+        self._fs_wf_bounds = []
         # 关闭行为（v2.2.0）：后端内存镜像。closing 拦截读它而不是读文件 ——
         # 前端 setUiPref 的 save_ui_settings 是异步调用且没有 await，刚勾上就
         # 点 × 时直接读 ui_settings.json 可能还是旧值。
@@ -828,6 +989,8 @@ class GuiApi:
         FormBorderStyle 会触发 RecreateHandle，钩子和样式全被洗掉，WebView2 也得
         跟着重建句柄。改成纯 SetWindowPos：进去 = 铺满整屏 + topmost，
         出来 = 回到进来时记下的矩形与最大化状态。全程关 DWM 过渡，全屏要立刻到位。
+        最大化态进出都要避开小窗口中间帧：进入前把两处还原缓存预置成整屏，
+        退出时先切回最大化、等状态落定后才把缓存写回原值（见两个 helper）。
 
         拿不到窗口（典型＝跑测试）或底层报错时返回 `ok: False`，前端据此降级成
         CSS 伪全屏（只是把导航栏和阅读器条收起来），而不是点了没反应。
@@ -867,12 +1030,24 @@ class GuiApi:
                         self._fs_state = int(getattr(native, "WindowState", 0) or 0)
                     except Exception:
                         self._fs_state = 0
+                    bounds = _screen_bounds_phys(hwnd)
+                    self._fs_wf_bounds = []
+                    if self._fs_state == 2 and bounds:
+                        # 最大化态：Win32 rcNormalPosition 与 WinForms 私有的
+                        # restoreBounds / restoredWindowBounds 两处都记着进全屏前的
+                        # 小窗口，Maximized→Normal 时会被各摆一次 → 中间态就是
+                        # 「窗口突然还原、图片瞬移到左上」。两处同时预置成全屏才能
+                        # 消掉（真机探针 .cache/probe_fs_winforms_state.py patch2
+                        # 实测零小窗帧）。失败整体降级回原路径，见 helper 的说明。
+                        ok_dual, saved = _preset_fullscreen_bounds(
+                            hwnd, native, bounds, self._fs_placement)
+                        if ok_dual:
+                            self._fs_wf_bounds = saved
                     if self._fs_state != 0:
                         # 先落回普通态，几何由下面铺满。不写 native.WindowState：
                         # pythonnet 3.x 裸 int 赋枚举属性会抛（v1.28.0 起最大化态
                         # 进全屏就是这一下炸的），走 SW_RESTORE 见该函数的说明。
                         _restore_from_maximized(hwnd)
-                    bounds = _screen_bounds_phys(hwnd)
                     if bounds:
                         # HWND_TOPMOST(-1)：铺满 + 压过任务栏。铺满失败要如实说 —
                         # 失败还记成全屏的话，前端会停在伪全屏且再也切不回来
@@ -891,16 +1066,22 @@ class GuiApi:
                     _dwm_attr(hwnd, _DWMWA_CORNER_PREFERENCE, 0)
                     _dwm_attr(hwnd, _DWMWA_BORDER_COLOR, 0xFFFFFFFF)
                     if self._fs_state == 2:
-                        # 回最大化前：先落一次 MaximizedBounds（同 maximize_window
-                        # 的做法），再把存下的 WINDOWPLACEMENT 写回 —— 不写的话
-                        # rcNormalPosition 已被铺满尺寸污染（进全屏时 Normal 态下
-                        # SetWindowPos 干的），之后点「还原」回不去原来的大小。
+                        # 回最大化前先落一次 MaximizedBounds（同 maximize_window）。
+                        # ★ 两处还原缓存此刻仍是「预置成整屏」的值：先切状态，
+                        #   Maximized 切换就不会按小矩形摆一次窗口。等状态落定后
+                        #   才写回原值（只改还原位置，不动当前几何）—— 写早了
+                        #   退出全屏同样会闪，见 _restore_fullscreen_bounds。
                         self.set_taskbar_mode(getattr(self, "_keep_taskbar", True))
-                        _set_window_placement(hwnd, self._fs_placement)
                         _show_window(hwnd, 3)     # SW_MAXIMIZE：进来时是最大化 → 回最大化
                         pos_ok = _set_window_pos(
                             hwnd, -2, 0, 0, 0, 0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+                        _wait_maximized(hwnd)
+                        # 两处都要写回：只写 Win32 placement 会留下被改成全屏的
+                        # WinForms 字段，用户点「还原」就还原成全屏尺寸。
+                        # 即使 pos_ok 失败也写回，避免缓存长期污染。
+                        _restore_fullscreen_bounds(
+                            hwnd, native, self._fs_wf_bounds, self._fs_placement)
                         self._maximized = True
                     elif self._fs_rect:
                         pos_ok = _set_window_pos(
@@ -921,6 +1102,7 @@ class GuiApi:
                     # 进出一次的暂存全部作废，防止下次失败路径用到陈旧值
                     self._fs_placement = None
                     self._fs_rect = None
+                    self._fs_wf_bounds = []
             finally:
                 _set_dwm_transitions(hwnd, True)
             return {"ok": True, "fullscreen": self._fullscreen}

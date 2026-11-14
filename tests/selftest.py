@@ -69,6 +69,7 @@ PY_TESTS = [
     ("返回记账静态检查（进页必须带来源参数）", "test_nav_backrefs.py"),
     ("未定义属性静态扫描", "test_attr_scan.py"),
     ("全屏 API 契约：无窗口 / 抛错 / 状态记账", "test_fullscreen_api.py"),
+    ("最大化进全屏：双缓存预置 / 对称写回 / 失败回滚", "test_fullscreen_dual_bounds.py"),
     ("CLI 入口：风控默认值 / URL 提取 / dry-run / 无参数进 GUI", "test_cli.py"),
     ("并发红线：上限 2 在代码 / GUI / README 三处同源 + 读写入口都夹住", "test_concurrency.py"),
     ("视频转图集：阈值夹取 / ffmpeg 查找 / 命令拼装（-fps_mode） + 真实抽帧", "test_videograb.py"),
