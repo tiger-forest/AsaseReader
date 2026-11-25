@@ -60,7 +60,9 @@ SNAPSHOT_ALLOW_TOP = frozenset({
 })
 # 明确拍板「不公开」的入库顶层项。白名单 + 本集合必须覆盖 git ls-files 的
 # 全部顶层名，否则新增文件会被静默漏出公开快照（P0-1）。
-SNAPSHOT_KNOWN_EXCLUDED = frozenset({".workbuddy", "PROGRESS.md"})
+# AGENTS.md：跨工具 agent 入口，内容指向不公开的 .workbuddy/memory/，
+# 公开仓库没有那个目录，公开它只会误导外部读者（2026-11-25 定为内部协作文件）。
+SNAPSHOT_KNOWN_EXCLUDED = frozenset({".workbuddy", "PROGRESS.md", "AGENTS.md"})
 SNAPSHOT_SKIP_NAMES = frozenset({
     "node_modules", "__pycache__", ".pytest_cache", ".git",
 })

@@ -78,7 +78,7 @@ PY_TESTS = [
     ("原生无边框 + DWM 过渡：钩子幂等 / 方向权威 / 禁过渡时序 / 补间不回潮", "test_window_anim.py"),
     ("界面设置持久化：后端副本 / 固定端口 / 无痕模式 / setUiPref / 启动写回", "test_ui_settings.py"),
     ("应用图标：ICO 结构 / 源码与打包两种跑法 / spec 声明 / favicon 路由", "test_app_icon.py"),
-    ("托盘与关闭行为：默认值 / 唯一拦截点 / 退出放行 / 单实例在抢端口前 / 关机放行", "test_tray.py"),
+    ("托盘常驻与自绘圆角菜单 / 关闭行为 / 单实例 / 关机放行", "test_tray.py"),
 ]
 
 JS_TESTS = [

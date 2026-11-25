@@ -1313,9 +1313,9 @@ def launch_gui(state_dir: str | None = None) -> None:
         所以全屏 / 最大化的记账天然保持一致，不需要额外复原状态。
         """
         try:
+            tray_icon.hide_menu()
             window.show()
             _install_native_borderless(window)   # 幂等：句柄万一重建过就补挂
-            tray_icon.set_visible(False)
         except Exception:
             pass
 
@@ -1331,7 +1331,9 @@ def launch_gui(state_dir: str | None = None) -> None:
         except Exception:
             pass
 
-    tray_icon = tray.TrayIcon(icon_file, _show_from_tray, _exit_from_tray)
+    # 菜单配色跟随界面设置的 uiMode（每次右键弹出时读一次后端副本，改动即时生效）。
+    tray_icon = tray.TrayIcon(icon_file, _show_from_tray, _exit_from_tray,
+                              theme_provider=api.get_ui_settings)
     _wake_msg_id = wake_id
     _wake_callback = _show_from_tray
 
@@ -1344,8 +1346,8 @@ def launch_gui(state_dir: str | None = None) -> None:
         if tray.decide_close(api._close_to_tray, api._exiting) != "hide":
             return None
         try:
+            tray_icon.hide_menu()
             window.hide()
-            tray_icon.set_visible(True)
         except Exception:
             return None
         return False
