@@ -49,6 +49,13 @@ from .videograb import (
     resolve_ffmpeg,
     video_filter_label,
 )
+from .webdav import (
+    WebDavCancelled,
+    WebDavError,
+    download_and_restore as webdav_download_and_restore,
+    test_connection as webdav_test_connection,
+    upload_backup as webdav_upload_backup,
+)
 
 # 项目根目录：打包成 exe 后（sys.frozen）以 exe 所在目录为准，
 # 源码运行时为 src/asase_reader/backend.py 上两级
@@ -175,6 +182,11 @@ DEFAULT_CONFIG = {
     # 阈值默认 0.02 由实测定（13 个样本，唯一张数从 0.025 起见顶，见 CHANGELOG 1.15.2）。
     "ffmpeg_path": "",
     "video_threshold": DEFAULT_THRESHOLD,
+    # WebDAV 单向备份与恢复（凭据允许本地保存；B 站 Cookie 仍只活内存）
+    "webdav_url": "",
+    "webdav_username": "",
+    "webdav_password": "",
+    "webdav_last_backup": None,
 }
 
 PATH_KEYS = ("shelf_dir", "download_dir")
@@ -318,7 +330,10 @@ class Backend:
         """
         root = self.shelf_root()
         key = str(root)
-        readonly = not bool(self.config.get("setup_done", False))
+        readonly = (
+            not bool(self.config.get("setup_done", False))
+            or bool(getattr(self, "_library_frozen", False))
+        )
         lib = getattr(self, "_library_obj", None)
         if (
             lib is None
@@ -329,6 +344,12 @@ class Backend:
             self._library_obj = lib
             self._library_key = key
         return lib
+
+    def _frozen_error(self) -> dict | None:
+        """WebDAV 备份/恢复期间冻结书库写入，避免后台索引与磁盘内容打架。"""
+        if getattr(self, "_library_frozen", False):
+            return {"ok": False, "error": "正在进行 WebDAV 备份或恢复，请稍后再操作"}
+        return None
 
     # ---------- 作品库 ----------
 
@@ -430,11 +451,15 @@ class Backend:
             }
 
     def create_work(self, name: str, author: str) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             w = self.library.create_work(name or "未命名作品", author or "")
             return {"id": w["id"]}
 
     def update_work(self, wid: str, patch: dict) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             w = self.library.update_work(wid, patch or {})
             return {"ok": True, "name": w["name"], "author": w["author"]}
@@ -449,35 +474,49 @@ class Backend:
                 return {"ok": False}
 
     def delete_work(self, wid: str) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             self.library.delete_work(wid)
             return {"ok": True}
 
     def add_chapters(self, wid: str, chapter_ids: list) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             w = self.library.add_chapters(wid, list(chapter_ids or []))
             return {"ok": True, "chapter_count": len(w["chapters"])}
 
     def remove_chapter(self, wid: str, chapter_id: str) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             self.library.remove_chapter(wid, chapter_id)
             return {"ok": True}
 
     def move_chapter(self, wid: str, chapter_id: str, delta: int) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             self.library.move_chapter(wid, chapter_id, int(delta))
             return {"ok": True}
 
     def update_chapter(self, wid: str, chapter_id: str, patch: dict) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             self.library.update_chapter(wid, chapter_id, patch or {})
             return {"ok": True}
 
     def set_work_cover_file(self, wid: str, src: str) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             return {"ok": True, "cover_url": self.library.set_work_cover(wid, src)}
 
     def set_chapter_cover_file(self, wid: str, chapter_id: str, src: str) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             return {
                 "ok": True,
@@ -486,6 +525,8 @@ class Backend:
 
     def save_chapter_cover_data(self, wid: str, chapter_id: str, data_url: str) -> dict:
         """存前端抓下来的封面画面（视频章节：当前这一帧）。"""
+        if err := self._frozen_error():
+            return err
         with self.lock:
             return {
                 "ok": True,
@@ -507,6 +548,8 @@ class Backend:
         # 落盘，一律拒绝（方案 §3 写入闸门）
         if not bool(self.config.get("setup_done", False)):
             return {"ok": False, "error": "尚未完成首次启动引导，请先确认书库目录"}
+        if err := self._frozen_error():
+            return err
         with self.lock:
             try:
                 ch = self.library.import_local_images(
@@ -523,6 +566,8 @@ class Backend:
         """一个文件夹里的图片 -> 一个章节。"""
         if not bool(self.config.get("setup_done", False)):
             return {"ok": False, "error": "尚未完成首次启动引导，请先确认书库目录"}
+        if err := self._frozen_error():
+            return err
         folder = Path(path or "")
         if not folder.is_dir():
             return {"ok": False, "error": "目录不存在"}
@@ -540,6 +585,8 @@ class Backend:
         """把暂存目录里已完成的章节搬进书架（双目录模式）。"""
         if not bool(self.config.get("setup_done", False)):
             return {"ok": False, "error": "尚未完成首次启动引导，请先确认书库目录"}
+        if err := self._frozen_error():
+            return err
         staging = self.download_root()
         if staging is None:
             return {"ok": False, "error": "当前是单目录模式，没有暂存目录"}
@@ -560,6 +607,8 @@ class Backend:
 
     def rename_chapter(self, chapter_id: str, title: str, author: str) -> dict:
         """未入库章节也能改名/改作者。"""
+        if err := self._frozen_error():
+            return err
         with self.lock:
             try:
                 ch = self.library.rename_chapter(chapter_id, title or "", author)
@@ -572,6 +621,8 @@ class Backend:
 
         删除与"所属作品"无关：未入库的章节同样能删（和 rename_chapter 一个口径）。
         """
+        if err := self._frozen_error():
+            return err
         with self.lock:
             try:
                 r = self.library.delete_chapter_images(chapter_id, list(files or []))
@@ -582,6 +633,8 @@ class Backend:
 
     def delete_chapter(self, chapter_id: str) -> dict:
         """把章节从书库彻底移除（含磁盘文件）。"""
+        if err := self._frozen_error():
+            return err
         with self.lock:
             try:
                 self.library.delete_chapter(chapter_id)
@@ -596,6 +649,8 @@ class Backend:
             return {"items": self.library.find_incomplete()}
 
     def purge_incomplete(self, names: list) -> dict:
+        if err := self._frozen_error():
+            return err
         with self.lock:
             n = self.library.purge_incomplete(list(names or []))
             self.log(f"已清理 {n} 个未完成的下载残留")
@@ -1591,8 +1646,12 @@ class Backend:
                     self.config[key] = bool(val)
                 elif key == "import_mode":
                     self.config[key] = "copy" if str(val) == "copy" else "move"
-                elif key in ("export_dir", "ffmpeg_path"):
+                elif key in ("export_dir", "ffmpeg_path", "webdav_url", "webdav_username"):
                     self.config[key] = str(val or "").strip()
+                elif key == "webdav_password":
+                    self.config[key] = str(val or "")
+                elif key == "webdav_last_backup":
+                    self.config[key] = val if isinstance(val, dict) else None
                 elif key == "video_threshold":
                     # 和 concurrency 一样：保存前先夹平，界面显示的值 = 真正生效的值
                     self.config[key] = clamp_threshold(val)
@@ -1898,6 +1957,201 @@ class Backend:
             job.status = "failed"
             job.error = str(e)
             self.log(f"[{job.opus_id}] 失败: {e}")
+
+    # ---------- WebDAV 备份与恢复 ----------
+
+    def _webdav_state(self) -> dict:
+        st = getattr(self, "_webdav", None)
+        if st is None:
+            st = {
+                "running": False, "finished": False, "cancelled": False,
+                "mode": "", "phase": "", "done": 0, "total": 0,
+                "current": "", "error": "", "result": None,
+            }
+            self._webdav = st
+        return st
+
+    def _webdav_creds(
+        self, url: str = "", username: str = "", password: str = ""
+    ) -> tuple[str, str, str]:
+        u = str(url or "").strip() or str(self.config.get("webdav_url") or "").strip()
+        user = str(username or "").strip() or str(self.config.get("webdav_username") or "").strip()
+        pwd = str(password if password != "" else (self.config.get("webdav_password") or ""))
+        return u, user, pwd
+
+    def _set_library_frozen(self, frozen: bool, *, reload_cache: bool = False) -> None:
+        with self.lock:
+            self._library_frozen = bool(frozen)
+            if reload_cache:
+                self._library_obj = None
+                self._library_key = None
+            elif getattr(self, "_library_obj", None) is not None:
+                self._library_obj.readonly = (
+                    not bool(self.config.get("setup_done", False))
+                    or self._library_frozen
+                )
+
+    def webdav_test(self, url: str = "", username: str = "", password: str = "") -> dict:
+        """测试 WebDAV 连通性并读取云端 latest.json。"""
+        u, user, pwd = self._webdav_creds(url, username, password)
+        try:
+            res = webdav_test_connection(
+                u, user, pwd, transport=getattr(self, "_webdav_transport", None)
+            )
+            if res.get("latest"):
+                with self.lock:
+                    self.config["webdav_last_backup"] = res["latest"]
+                self._save_config()
+            return res
+        except WebDavError as e:
+            return {"ok": False, "error": str(e)}
+
+    def webdav_backup_start(self) -> dict:
+        """启动后台 WebDAV 全库备份。"""
+        with self.lock:
+            st = self._webdav_state()
+            if st["running"]:
+                return {"ok": False, "error": "已有 WebDAV 任务正在运行"}
+            if not bool(self.config.get("setup_done", False)):
+                return {"ok": False, "error": "请先确认书架目录"}
+            u, user, pwd = self._webdav_creds()
+            if not u or not user or not pwd:
+                return {"ok": False, "error": "请先填写并保存 WebDAV 地址、用户名和密码"}
+            shelf = self.shelf_root()
+            if not shelf.exists():
+                return {"ok": False, "error": "书架目录不存在，无法备份"}
+            st.update({
+                "running": True, "finished": False, "cancelled": False,
+                "mode": "backup", "phase": "packing",
+                "done": 0, "total": 0, "current": "", "error": "", "result": None,
+            })
+            self._set_library_frozen(True)
+        threading.Thread(
+            target=self._run_webdav_backup, args=(u, user, pwd, shelf, st), daemon=True
+        ).start()
+        return {"ok": True}
+
+    def _run_webdav_backup(
+        self, url: str, username: str, password: str, shelf: Path, st: dict
+    ) -> None:
+        tmp_dir = get_data_dir() / "webdav_tmp"
+        try:
+            def on_prog(phase: str, done: int, total: int, name: str) -> None:
+                st.update({"phase": phase, "done": done, "total": total, "current": name})
+
+            manifest = webdav_upload_backup(
+                url, username, password, shelf, tmp_dir,
+                should_cancel=lambda: st["cancelled"],
+                on_progress=on_prog,
+                transport=getattr(self, "_webdav_transport", None),
+            )
+            with self.lock:
+                self.config["webdav_last_backup"] = manifest
+            self._save_config()
+            self._notify_state()
+            st["result"] = manifest
+            self.log(f"WebDAV 备份完成：{manifest['filename']}")
+        except WebDavCancelled:
+            st["cancelled"] = True
+            self.log("WebDAV 备份已取消")
+        except WebDavError as e:
+            st["error"] = str(e)
+            self.log(f"WebDAV 备份失败：{e}")
+        except Exception as e:
+            st["error"] = str(e)
+            self.log(f"WebDAV 备份失败：{e}")
+        finally:
+            self._set_library_frozen(False)
+            st["running"] = False
+            st["finished"] = True
+
+    def webdav_restore_start(self, target_dir: str = "") -> dict:
+        """启动后台 WebDAV 恢复（target_dir 为空时恢复到当前 shelf_root）。"""
+        raw_target = str(target_dir or "").strip()
+        with self.lock:
+            st = self._webdav_state()
+            if st["running"]:
+                return {"ok": False, "error": "已有 WebDAV 任务正在运行"}
+            if any(j.status == "running" for j in self.jobs):
+                return {"ok": False, "error": "有下载任务正在运行，请先暂停或等待完成后再恢复"}
+            u, user, pwd = self._webdav_creds()
+            if not u or not user or not pwd:
+                return {"ok": False, "error": "请先填写并保存 WebDAV 地址、用户名和密码"}
+            if raw_target:
+                vr = self._validate_path(raw_target)
+                if not vr["ok"]:
+                    return {"ok": False, "error": vr["error"] or "恢复目标目录校验失败"}
+                dest = Path(os.path.expanduser(raw_target))
+                commit_shelf = raw_target
+            else:
+                dest = self.shelf_root()
+                commit_shelf = ""
+            st.update({
+                "running": True, "finished": False, "cancelled": False,
+                "mode": "restore", "phase": "downloading",
+                "done": 0, "total": 0, "current": "", "error": "", "result": None,
+            })
+            self._set_library_frozen(True)
+        threading.Thread(
+            target=self._run_webdav_restore,
+            args=(u, user, pwd, dest, commit_shelf, st),
+            daemon=True,
+        ).start()
+        return {"ok": True}
+
+    def _run_webdav_restore(
+        self, url: str, username: str, password: str,
+        dest: Path, commit_shelf: str, st: dict,
+    ) -> None:
+        tmp_dir = get_data_dir() / "webdav_tmp"
+        reload_cache = False
+        try:
+            def on_prog(phase: str, done: int, total: int, name: str) -> None:
+                st.update({"phase": phase, "done": done, "total": total, "current": name})
+
+            res = webdav_download_and_restore(
+                url, username, password, dest, tmp_dir,
+                should_cancel=lambda: st["cancelled"],
+                on_progress=on_prog,
+                transport=getattr(self, "_webdav_transport", None),
+            )
+            with self.lock:
+                if commit_shelf:
+                    self.config["shelf_dir"] = commit_shelf
+                self.config["setup_done"] = True
+                if res.get("filename"):
+                    self.config["webdav_last_backup"] = {
+                        "filename": res["filename"],
+                        "created_at": res.get("created_at", ""),
+                        "size": res.get("size", 0),
+                    }
+                if self.static_server is not None:
+                    self.static_server.set_root(self.shelf_root())
+            self._save_config()
+            reload_cache = True
+            self._notify_state()
+            st["result"] = res
+            self.log(f"WebDAV 恢复完成：{res['filename']}")
+        except WebDavCancelled:
+            st["cancelled"] = True
+            self.log("WebDAV 恢复已取消")
+        except WebDavError as e:
+            st["error"] = str(e)
+            self.log(f"WebDAV 恢复失败：{e}")
+        except Exception as e:
+            st["error"] = str(e)
+            self.log(f"WebDAV 恢复失败：{e}")
+        finally:
+            self._set_library_frozen(False, reload_cache=reload_cache)
+            st["running"] = False
+            st["finished"] = True
+
+    def webdav_status(self) -> dict:
+        return dict(self._webdav_state())
+
+    def webdav_cancel(self) -> dict:
+        self._webdav_state()["cancelled"] = True
+        return {"ok": True}
 
 
 def __getattr__(name: str):

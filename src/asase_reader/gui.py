@@ -1206,6 +1206,23 @@ class GuiApi:
     def export_cancel(self) -> dict:
         return self._b.export_cancel()
 
+    # ---- WebDAV 备份与恢复 ----
+
+    def webdav_test(self, url: str = "", username: str = "", password: str = "") -> dict:
+        return self._b.webdav_test(url or "", username or "", password or "")
+
+    def webdav_backup_start(self) -> dict:
+        return self._b.webdav_backup_start()
+
+    def webdav_restore_start(self, target_dir: str = "") -> dict:
+        return self._b.webdav_restore_start(target_dir or "")
+
+    def webdav_status(self) -> dict:
+        return self._b.webdav_status()
+
+    def webdav_cancel(self) -> dict:
+        return self._b.webdav_cancel()
+
     # ---- 视频转图集（v1.15） ----
     # 状态机：start（预估）→ status 轮询到 phase=confirm → confirm（抽帧入库）→ status。
 
@@ -1289,9 +1306,13 @@ def launch_gui(state_dir: str | None = None) -> None:
     base = server.start(port=_GUI_PORT)
     backend.static_server = server
     api = GuiApi(backend)
+    try:
+        html_ver = int(html_path.stat().st_mtime)
+    except OSError:
+        html_ver = 0
     window = webview.create_window(
         title=f"浅濑阅读器 Asase Reader v{__version__}",
-        url=f"{base}/",
+        url=f"{base}/?_={html_ver}",
         js_api=api,
         width=1080,
         height=800,

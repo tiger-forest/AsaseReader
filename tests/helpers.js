@@ -23,6 +23,8 @@ const DEFAULT_CFG = {
   setup_done: true,
   export_dir: '', export_naming: 'numbered',
   paid_ups: [], ffmpeg_path: '', video_threshold: 0.02,
+  webdav_url: '', webdav_username: '', webdav_password: '',
+  webdav_last_backup: null,
 };
 
 // get_state 新增字段：首启模态预填用的「文档」默认书库（纯显示桩值，

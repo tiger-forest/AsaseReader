@@ -189,6 +189,8 @@ def main() -> None:
     s3 = StaticServer(root=far, gui_html=gui_html)
     b3 = s3.start()
     try:
+        cc_gui = (urllib.request.urlopen(b3 + "/").headers.get("Cache-Control") or "").lower()
+        check("no-store" in cc_gui, f"gui.html 禁用了强缓存（Cache-Control = {cc_gui!r}）")
         cov_path = "/outputs/" + b.library.get_chapter("opus_123")["cover"]
         cc = (urllib.request.urlopen(b3 + quote(cov_path)).headers.get("Cache-Control") or "").lower()
         check("no-store" in cc, f"封面禁用了强缓存（Cache-Control = {cc!r}）")

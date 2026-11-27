@@ -3484,6 +3484,33 @@
     </div>
     <div class="hint" style="align-self:flex-start;margin:0">仅供个人离线阅读，请勿二次分发。</div>
   </div>
+  <div class="card" id="settingsWebdav">
+    <h2>WebDAV 备份与恢复</h2>
+    <div class="dirrow">
+      <span class="lbl">WebDAV 地址</span>
+      <input type="text" id="cfg_webdav_url" placeholder="例如 https://example.com/dav/" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="dirrow">
+      <span class="lbl">用户名</span>
+      <input type="text" id="cfg_webdav_username" placeholder="WebDAV 用户名 / Connection ID" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="dirrow">
+      <span class="lbl">密码</span>
+      <input type="password" id="cfg_webdav_password" placeholder="WebDAV 密码 / Apps Password" autocomplete="off">
+    </div>
+    <div class="hint" id="webdavLastInfo" style="align-self:flex-start;margin:0 0 6px 0">尚未备份过</div>
+    <div id="webdavTestMsg" class="dirMsg" style="display:none"></div>
+    <div class="hint" style="align-self:flex-start;margin:0 0 10px 0">
+      单向整包备份当前书架（含视频与封面，不含本机配置），云端专属子目录 <code>AsaseReader/</code> 只保留最新一份。
+      恢复已有书库时会自动将原书架目录旁移留档。
+    </div>
+    <div class="row">
+      <button class="primary" id="btnSaveWebdav">保存配置</button>
+      <button id="btnTestWebdav">测试连接</button>
+      <button id="btnWebdavBackup">立即备份</button>
+      <button id="btnWebdavRestore">从云端恢复…</button>
+    </div>
+  </div>
 </div>
 
 <!-- ============ 书架页 ============ -->
@@ -3704,7 +3731,8 @@
       已预填默认位置，可直接确认。书库会持续增长，建议选择空间充裕的非系统盘；
       仅支持本地固定磁盘，网络盘与可移动盘不可用。此选择之后仍可在设置页修改。
     </div>
-    <div class="row" style="justify-content:flex-end;margin:4px 0 0">
+    <div class="row" style="justify-content:space-between;margin:4px 0 0">
+      <button id="btnSetupWebdavRestore">从 WebDAV 恢复书库…</button>
       <button class="primary" id="btnSetupConfirm">确认并开始使用</button>
     </div>
   </div>
@@ -4256,6 +4284,7 @@ function applyConfigResult(r, toastMsg = "设置已保存") {
   if (r && r.ok === false) { showError(r.error || "设置没保存"); return false; }
   if (r && r.config) {
     fillDlSettings(r.config); fillDirSettings(r.config); fillVideoSettings(r.config);
+    fillWebdavSettings(r.config);
   }
   if (toastMsg) toast(toastMsg);
   return true;
@@ -4333,6 +4362,213 @@ $('btnSetupConfirm').onclick = async () => {
     const error = (e && (e.message || e.reason)) || e || '书库目录没保存上';
     setDirMessage(DIR_PREVIEW_IDS.setup.error, String(error));
   }
+};
+
+function formatWebdavBytes(n) {
+  const v = Number(n) || 0;
+  if (v <= 0) return "0 B";
+  if (v < 1024) return v + " B";
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + " KB";
+  if (v < 1024 * 1024 * 1024) return (v / (1024 * 1024)).toFixed(1) + " MB";
+  return (v / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+}
+function renderWebdavLast(info) {
+  const el = $("webdavLastInfo");
+  if (!el) return;
+  if (info && info.filename) {
+    const t = info.created_at ? info.created_at.replace("T", " ").slice(0, 19) : "";
+    const sz = info.size ? "，" + formatWebdavBytes(info.size) : "";
+    el.textContent = `最近备份：${t || info.filename}${sz}（${info.filename}）`;
+  } else {
+    el.textContent = "尚未备份过";
+  }
+}
+function fillWebdavSettings(cfg) {
+  if (!$("cfg_webdav_url")) return;
+  $("cfg_webdav_url").value = cfg.webdav_url || "";
+  $("cfg_webdav_username").value = cfg.webdav_username || "";
+  $("cfg_webdav_password").value = cfg.webdav_password || "";
+  renderWebdavLast(cfg.webdav_last_backup);
+}
+async function saveWebdavInputs(silent = false) {
+  const r = await api().update_config({
+    webdav_url: $("cfg_webdav_url").value,
+    webdav_username: $("cfg_webdav_username").value,
+    webdav_password: $("cfg_webdav_password").value,
+  });
+  return applyConfigResult(r, silent ? "" : "WebDAV 配置已保存");
+}
+let webdavTimer = null;
+function formatWebdavPhase(s) {
+  const p = s.phase || "";
+  if (p === "packing") return `正在打包书架 (${s.done || 0}/${s.total || 0}) ${s.current || ""}`;
+  if (p === "uploading") {
+    const pct = s.total ? Math.min(100, Math.round((s.done || 0) * 100 / s.total)) : 0;
+    return `正在上传备份 ${pct}% (${formatWebdavBytes(s.done)}/${formatWebdavBytes(s.total)})`;
+  }
+  if (p === "downloading") {
+    const pct = s.total ? Math.min(100, Math.round((s.done || 0) * 100 / s.total)) : 0;
+    return `正在下载备份 ${pct}% (${formatWebdavBytes(s.done)}/${formatWebdavBytes(s.total)})`;
+  }
+  if (p === "extracting") return "正在解压并替换书库…";
+  return s.mode === "restore" ? "正在恢复…" : "正在备份…";
+}
+function openWebdavProgressModal(titleText, onSuccess) {
+  if (webdavTimer) { clearTimeout(webdavTimer); webdavTimer = null; }
+  showModal(`
+    <h3 style="margin:0 0 8px">${escapeHtml(titleText)}</h3>
+    <div id="m_wd_prog" class="hint" style="margin:6px 0 12px">准备中…</div>
+    <div class="row" style="justify-content:flex-end;margin:0">
+      <button id="m_wd_cancel">取消</button>
+      <button class="primary" id="m_ok" disabled>完成</button>
+    </div>`, () => { hideModal(); });
+  $("m_wd_cancel").onclick = () => api().webdav_cancel();
+  const pollWd = async () => {
+    const s = await api().webdav_status();
+    $("m_wd_prog").textContent = formatWebdavPhase(s);
+    if (s.running) { webdavTimer = setTimeout(pollWd, 300); return; }
+    $("m_wd_cancel").style.display = "none";
+    $("m_ok").disabled = false;
+    if (s.error) {
+      $("m_wd_prog").textContent = "失败：" + s.error;
+      return;
+    }
+    if (s.cancelled) {
+      $("m_wd_prog").textContent = "已取消";
+      return;
+    }
+    const res = s.result || {};
+    $("m_wd_prog").textContent = s.mode === "restore"
+      ? `恢复完成：${res.filename || ""}` + (res.rollback_dir ? `（原书库已备份至 ${res.rollback_dir}）` : "")
+      : `备份完成：${res.filename || ""}（${formatWebdavBytes(res.size || 0)}）`;
+    if (onSuccess) await onSuccess(res);
+  };
+  pollWd();
+}
+$("btnSaveWebdav").onclick = async () => {
+  try {
+    await withBusy($("btnSaveWebdav"), () => saveWebdavInputs(false));
+  } catch (e) { showError(e); }
+};
+$("btnTestWebdav").onclick = async () => {
+  const msg = $("webdavTestMsg");
+  try {
+    await withBusy($("btnTestWebdav"), async () => {
+      const r = await api().webdav_test(
+        $("cfg_webdav_url").value,
+        $("cfg_webdav_username").value,
+        $("cfg_webdav_password").value,
+      );
+      msg.style.display = "block";
+      if (!r || r.ok === false) {
+        msg.className = "dirMsg error";
+        msg.textContent = (r && r.error) || "连接失败";
+        return;
+      }
+      msg.className = "dirMsg";
+      if (r.latest && r.latest.filename) {
+        renderWebdavLast(r.latest);
+        msg.textContent = `连接成功：云端已有备份 ${r.latest.filename}（${formatWebdavBytes(r.latest.size || 0)}）`;
+      } else {
+        msg.textContent = "连接成功：专属目录已就绪（云端暂无备份）";
+      }
+    }, "测试中…");
+  } catch (e) {
+    msg.style.display = "block";
+    msg.className = "dirMsg error";
+    msg.textContent = String((e && e.message) || e);
+  }
+};
+$("btnWebdavBackup").onclick = async () => {
+  try {
+    if (!await saveWebdavInputs(true)) return;
+    const r = await api().webdav_backup_start();
+    if (!r || r.ok === false) { showError((r && r.error) || "无法启动备份"); return; }
+    openWebdavProgressModal("WebDAV 备份", async (res) => {
+      renderWebdavLast(res);
+      toast("WebDAV 备份完成");
+    });
+  } catch (e) { showError(e); }
+};
+$("btnWebdavRestore").onclick = async () => {
+  try {
+    if (!await saveWebdavInputs(true)) return;
+    showModal(`
+      <h3 style="margin:0 0 8px">从 WebDAV 恢复书库</h3>
+      <div class="hint" style="margin:0 0 10px">
+        将从云端拉取最新备份并替换当前书架目录。已有书架内容会自动重命名留档到同级目录（不会直接删除），确定继续？
+      </div>
+      <div class="row" style="justify-content:flex-end;margin:0">
+        <button onclick="hideModal()">取消</button>
+        <button class="primary" id="m_ok">确定恢复</button>
+      </div>`, async () => {
+        const r = await api().webdav_restore_start("");
+        if (!r || r.ok === false) { showError((r && r.error) || "无法启动恢复"); return; }
+        openWebdavProgressModal("WebDAV 恢复", async () => {
+          await renderShelf();
+          toast("已从 WebDAV 恢复书库");
+        });
+      });
+  } catch (e) { showError(e); }
+};
+$("btnSetupWebdavRestore").onclick = () => {
+  const initDir = ($("setupShelfDir").value || "").trim();
+  const cfg = (dlState && dlState.config) || {};
+  showModal(`
+    <h3 style="margin:0 0 8px">从 WebDAV 恢复书库</h3>
+    <label>目标书库目录
+      <div class="dirrow" style="margin:4px 0 0">
+        <input type="text" id="m_wd_dir" value="${escapeHtml(initDir)}" autocomplete="off" spellcheck="false">
+        <button class="small" type="button" id="m_wd_pick">浏览…</button>
+      </div>
+    </label>
+    <label>WebDAV 地址 <input type="text" id="m_wd_url" value="${escapeHtml(cfg.webdav_url || "")}" placeholder="https://example.com/dav/" autocomplete="off"></label>
+    <label>用户名 <input type="text" id="m_wd_user" value="${escapeHtml(cfg.webdav_username || "")}" autocomplete="off"></label>
+    <label>密码 <input type="password" id="m_wd_pwd" value="${escapeHtml(cfg.webdav_password || "")}" autocomplete="off"></label>
+    <div id="m_wd_msg" class="dirMsg" style="display:none"></div>
+    <div class="row" style="justify-content:flex-end;margin:6px 0 0">
+      <button type="button" id="m_wd_test">测试连接</button>
+      <button type="button" onclick="hideModal()">取消</button>
+      <button class="primary" id="m_ok">开始恢复</button>
+    </div>`, async () => {
+      const targetDir = ($("m_wd_dir").value || "").trim();
+      if (!targetDir) { showError("请先填写目标书库目录"); return; }
+      const cr = await api().update_config({
+        webdav_url: $("m_wd_url").value,
+        webdav_username: $("m_wd_user").value,
+        webdav_password: $("m_wd_pwd").value,
+      });
+      if (!cr || cr.ok === false) { showError((cr && cr.error) || "保存 WebDAV 配置失败"); return; }
+      const r = await api().webdav_restore_start(targetDir);
+      if (!r || r.ok === false) { showError((r && r.error) || "无法启动恢复"); return; }
+      openWebdavProgressModal("WebDAV 恢复", async () => {
+        const st = await api().get_state();
+        if (st) window.__onState(st);
+        $("setupModal").classList.remove("show");
+        enterMainUI();
+        toast("已从 WebDAV 恢复书库");
+      });
+    });
+  $("m_wd_pick").onclick = async () => {
+    const p = await pickFolder();
+    if (p) $("m_wd_dir").value = p;
+  };
+  $("m_wd_test").onclick = async () => {
+    const msg = $("m_wd_msg");
+    const r = await api().webdav_test(
+      $("m_wd_url").value, $("m_wd_user").value, $("m_wd_pwd").value
+    );
+    msg.style.display = "block";
+    if (!r || r.ok === false) {
+      msg.className = "dirMsg error";
+      msg.textContent = (r && r.error) || "连接失败";
+    } else {
+      msg.className = "dirMsg";
+      msg.textContent = r.latest && r.latest.filename
+        ? `连接成功：云端已有备份 ${r.latest.filename}`
+        : "连接成功（云端暂无备份）";
+    }
+  };
 };
 
 $("btnPickFfmpeg").onclick = async () => {
@@ -6970,6 +7206,7 @@ async function boot() {
     fillDlSettings(s.config);
     fillDirSettings(s.config);
     await fillVideoSettings(s.config);
+    fillWebdavSettings(s.config);
     applyChargeFold();
     initUiSettings();
     try {

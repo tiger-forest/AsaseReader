@@ -135,9 +135,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Accept-Ranges", "bytes")
                 # 封面会被反复覆盖（换一张、从视频里截一帧），路径却始终不变 ——
                 # 这里不禁强缓存的话，改完封面得重启程序才看得到新图。
+                # gui.html 同理：固定端口 + 持久化 webview_data 下，禁强缓存才能保证
+                # 升级或重打包后立即生效，不读上一版的旧页面。
                 # 其余资源（正文图片）一小时内不会变，缓存照旧：视频章节大、
                 # 图片多，每次都回源是白白的开销。
-                if f.parent.name == "_covers":
+                if f == self.server.gui_html or f.parent.name == "_covers":
                     self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
                     self.send_header("Pragma", "no-cache")
                     self.send_header("Expires", "0")

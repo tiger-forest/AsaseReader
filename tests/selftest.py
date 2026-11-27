@@ -79,6 +79,7 @@ PY_TESTS = [
     ("界面设置持久化：后端副本 / 固定端口 / 无痕模式 / setUiPref / 启动写回", "test_ui_settings.py"),
     ("应用图标：ICO 结构 / 源码与打包两种跑法 / spec 声明 / favicon 路由", "test_app_icon.py"),
     ("托盘常驻与自绘圆角菜单 / 关闭行为 / 单实例 / 关机放行", "test_tray.py"),
+    ("WebDAV 单向备份与恢复：连接测试 / 原子上传 / 清理旧包 / 旁移留档 / 冻结闸门", "test_webdav.py"),
 ]
 
 JS_TESTS = [
@@ -105,6 +106,7 @@ JS_TESTS = [
     ("视频章节：旁路 / 键盘自接管 / 章末页复用 / 错误占位 / 切回复位", "test_reader_video.js"),
     ("章节封面：视频截帧 / 从章节内容选取 / 按钮显隐", "test_reader_cover.js"),
     ("托盘关闭行为：默认直接关闭 / 开关回填 / setUiPref 双写 / 最小化不变", "test_tray_ui.js"),
+    ("WebDAV 备份与恢复 UI：配置回填 / 测试连接 / 立即备份 / 首启恢复入口", "test_webdav_ui.js"),
 ]
 
 

@@ -8,6 +8,8 @@
 
 当前版本 **2.3.0**（[更新日志](CHANGELOG.md)） · Windows 10/11 x64 · Python 3.11+（源码运行）
 
+**移动端伴侣**：Android 客户端见 [AsaseReaderMobile](https://github.com/tiger-forest/AsaseReaderMobile)（通过 WebDAV 单向拉取电脑端书库备份，离线阅读漫画与视频章节）。
+
 > **使用边界**：仅用于个人离线阅读，请遵守站点条款与版权，**不要二次分发下载到的内容**。
 > 本仓库公开的是代码，不含任何书库、下载内容或账号凭据；程序默认不使用登录 Cookie，
 > 仅在遇到付费墙时由用户临时提供、只存内存、退出即消失；视频转图集需自备 ffmpeg。

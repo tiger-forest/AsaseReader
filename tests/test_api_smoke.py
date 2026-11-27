@@ -106,6 +106,12 @@ ARGS = {
     "export_start": ("work", wid, str(TMP / "export_out"), "numbered"),
     "export_status": (),
     "export_cancel": (),
+    # WebDAV 备份与恢复：空参数走"未填写配置返回 ok:False"分支，不碰网络
+    "webdav_test": ("", "", ""),
+    "webdav_backup_start": (),
+    "webdav_restore_start": ("",),
+    "webdav_status": (),
+    "webdav_cancel": (),
     # 登录凭据：整串都是假的，且只进内存不落盘。
     # add_paid_up 必须在 remove_paid_up 之前（按字母序跑，天然满足）
     "submit_cookie": ("SESSDATA=fake_for_smoke; bili_jct=fake; DedeUserID=1",),
