@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src/asase_reader/assets/icon_128.png" width="96" alt="浅濑阅读器 Asase Reader" />
+</p>
+
 # 浅濑阅读器 Asase Reader
 
 **Windows 上的本地离线漫画阅读器。** 把图片整理成「书架 → 作品 → 章节」，
