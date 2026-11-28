@@ -6,7 +6,7 @@
 
 书库内容可以来自本地图片、本地视频，也可以来自 B 站专栏（opus）。
 
-当前版本 **2.3.0**（[更新日志](CHANGELOG.md)） · Windows 10/11 x64 · Python 3.11+（源码运行）
+当前版本 **2.4.0**（[更新日志](CHANGELOG.md)） · Windows 10/11 x64 · Python 3.11+（源码运行）
 
 **移动端伴侣**：Android 客户端见 [AsaseReaderMobile](https://github.com/tiger-forest/AsaseReaderMobile)（通过 WebDAV 单向拉取电脑端书库备份，离线阅读漫画与视频章节）。
 
